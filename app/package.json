@@ -7,6 +7,7 @@
     "expo": "~57.0.20",
     "expo-av": "^16.0.8",
     "expo-camera": "~57.0.4",
+    "expo-dev-client": "~57.0.18",
     "expo-document-picker": "~57.0.1",
     "expo-status-bar": "~57.0.1",
     "react": "19.2.3",
@@ -17,6 +18,7 @@
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
+    "eas-cli": "^23.2.0",
     "typescript": "~6.0.3"
   },
   "scripts": {
