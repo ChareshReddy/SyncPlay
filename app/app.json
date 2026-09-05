@@ -34,7 +34,8 @@
         "android.permission.WAKE_LOCK",
         "android.permission.CAMERA"
       ],
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "minSdkVersion": 29
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -43,6 +44,16 @@
       "eas": {
         "projectId": "4b3d3bdf-b7be-4c9c-9c09-fcd8508b5ebf"
       }
-    }
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 29
+          }
+        }
+      ]
+    ]
   }
 }

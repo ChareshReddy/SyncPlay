@@ -11,11 +11,22 @@ Unlike AmpMe, SyncPlay has **no deceptive weekly auto-renewing subscriptions, no
 
 ---
 
+## 📱 Platform Support & Requirements
+
+- **Android**: **Android 10+ (API 29+)**
+  - Android 10+ is required by `AudioPlaybackCaptureConfiguration` for native internal system audio capture and relay.
+  - `minSdkVersion` is configured to `29` via `expo-build-properties`.
+- **iOS**: **iOS 14+**
+  - File-based synchronized playback, Cristian's NTP clock sync, and stereo speaker assignment are fully supported.
+  - Live system audio capture is restricted on iOS due to OS isolation policies.
+
+---
+
 ## 📁 Repository Structure
 
 ```
 SyncPlay/
-├── app/                          # React Native mobile app (Expo SDK 54, iOS + Android)
+├── app/                          # React Native mobile app (Expo SDK, iOS 14+ & Android 10+ [API 29+])
 │   ├── App.tsx                   # App root with navigation & background audio setup
 │   ├── app.json                  # Native permissions (background audio, camera)
 │   ├── src/
