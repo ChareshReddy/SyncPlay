@@ -12,6 +12,7 @@ import { audioManager } from '../audio/AudioManager';
 import { syncEngine } from '../sync/SyncEngine';
 import { liveStreamManager } from '../audio/LiveStreamManager';
 import { fetchSampleTracks } from '../api/audioUpload';
+import { normalizeServerUrl, DEFAULT_RENDER_SERVER_URL } from '../api/serverConfig';
 import {
   CapacityAlert,
   ConnectionState,
@@ -81,7 +82,7 @@ const STORAGE_KEY_DEVICE = '@syncplay_device_name';
 const RECONNECT_TIMEOUT_MS = 15000; // 15s retry window
 
 export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [serverUrl, setServerUrlState] = useState<string>('http://192.168.0.105:4000');
+  const [serverUrl, setServerUrlState] = useState<string>(DEFAULT_RENDER_SERVER_URL);
   const [deviceName, setDeviceNameState] = useState<string>('My Phone');
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
   const [isHost, setIsHost] = useState<boolean>(false);
@@ -140,7 +141,24 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
     (async () => {
       try {
         const savedServer = await AsyncStorage.getItem(STORAGE_KEY_SERVER);
-        if (savedServer) setServerUrlState(savedServer);
+        if (savedServer) {
+          // If previous default was the hardcoded 192.168.0.105:4000 or internal container 10.29.59.26, migrate to Render URL
+          if (
+            savedServer.includes('192.168.0.105') ||
+            savedServer.includes('10.29.59.26')
+          ) {
+            setServerUrlState(DEFAULT_RENDER_SERVER_URL);
+            socketService.setServerUrl(DEFAULT_RENDER_SERVER_URL);
+            AsyncStorage.setItem(STORAGE_KEY_SERVER, DEFAULT_RENDER_SERVER_URL).catch(() => {});
+          } else {
+            const normalized = normalizeServerUrl(savedServer);
+            setServerUrlState(normalized);
+            socketService.setServerUrl(normalized);
+          }
+        } else {
+          socketService.setServerUrl(DEFAULT_RENDER_SERVER_URL);
+        }
+
         const savedDevice = await AsyncStorage.getItem(STORAGE_KEY_DEVICE);
         if (savedDevice) setDeviceNameState(savedDevice);
       } catch (e) {
@@ -150,8 +168,10 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const setServerUrl = (url: string) => {
-    setServerUrlState(url);
-    AsyncStorage.setItem(STORAGE_KEY_SERVER, url).catch(() => {});
+    const clean = normalizeServerUrl(url);
+    setServerUrlState(clean);
+    socketService.setServerUrl(clean);
+    AsyncStorage.setItem(STORAGE_KEY_SERVER, clean).catch(() => {});
   };
 
   const setDeviceName = (name: string) => {

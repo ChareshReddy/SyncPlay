@@ -19,6 +19,13 @@ import {
 import { useRoom } from '../context/RoomContext';
 import { colors } from '../theme/colors';
 import { QRScannerModal } from '../components/QRScannerModal';
+import {
+  checkServerHealth,
+  HealthCheckResult,
+  normalizeServerUrl,
+  DEFAULT_RENDER_SERVER_URL,
+  DEFAULT_LOCAL_SERVER_URL,
+} from '../api/serverConfig';
 
 interface Props {
   onEnterHostScreen: () => void;
@@ -43,6 +50,31 @@ export const HomeScreen: React.FC<Props> = ({
   const [tempServerUrl, setTempServerUrl] = useState(serverUrl);
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [isTestingConnection, setIsTestingConnection] = useState(false);
+  const [testNotice, setTestNotice] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<HealthCheckResult | null>(null);
+
+  const handleTestConnection = async (urlOverride?: string) => {
+    const targetUrl = urlOverride || tempServerUrl || serverUrl;
+    setIsTestingConnection(true);
+    setTestNotice(null);
+    setTestResult(null);
+
+    const result = await checkServerHealth(targetUrl, (notice) => {
+      setTestNotice(notice);
+    });
+
+    setIsTestingConnection(false);
+    setTestNotice(null);
+    setTestResult(result);
+
+    if (!result.ok) {
+      Alert.alert(
+        'Connection Test Failed',
+        `${result.message}\n\nMake sure the server is awake or check your network URL.`
+      );
+    }
+  };
 
   const handleCreateRoom = async () => {
     setIsLoading(true);
@@ -53,7 +85,12 @@ export const HomeScreen: React.FC<Props> = ({
     } else {
       Alert.alert(
         'Connection Error',
-        `Could not reach server at ${serverUrl}. Make sure the Node.js server is running and both devices are on the same WiFi.`
+        `Could not reach server at ${serverUrl}.\n\nIf using the free cloud server, it may be waking up (cold start can take ~60s).`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Test Server', onPress: () => handleTestConnection() },
+          { text: 'Retry', onPress: () => handleCreateRoom() },
+        ]
       );
     }
   };
@@ -72,14 +109,26 @@ export const HomeScreen: React.FC<Props> = ({
     if (result.success) {
       onEnterGuestScreen();
     } else {
-      Alert.alert('Join Error', result.error || 'Failed to join room.');
+      Alert.alert(
+        'Join Error',
+        result.error || 'Failed to join room.',
+        [
+          { text: 'OK', style: 'default' },
+          { text: 'Test Server', onPress: () => handleTestConnection(customServer) },
+        ]
+      );
     }
   };
 
-  const handleSaveServerUrl = () => {
-    setServerUrl(tempServerUrl);
+  const handleSaveServerUrl = async () => {
+    const normalized = normalizeServerUrl(tempServerUrl);
+    setServerUrl(normalized);
+    setTempServerUrl(normalized);
     setIsServerEditOpen(false);
+    await handleTestConnection(normalized);
   };
+
+  const isRemoteServer = normalizeServerUrl(serverUrl).startsWith('https://');
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -87,7 +136,7 @@ export const HomeScreen: React.FC<Props> = ({
       <ScrollView contentContainerStyle={styles.container}>
         {/* Branding Header */}
         <View style={styles.brandHeader}>
-          <Text style={styles.brandBadge}>LOCAL WIFI AUDIO SYNC</Text>
+          <Text style={styles.brandBadge}>MULTI-SPEAKER AUDIO SYNC</Text>
           <Text style={styles.brandTitle}>SyncPlay</Text>
           <Text style={styles.brandSubtitle}>
             Turn multiple phones into a synchronized multi-speaker sound system.
@@ -97,13 +146,51 @@ export const HomeScreen: React.FC<Props> = ({
         {/* Server IP Connection Bar */}
         <View style={styles.serverCard}>
           <View style={styles.serverRow}>
-            <View style={styles.serverStatusDot} />
+            <View
+              style={[
+                styles.serverStatusDot,
+                testResult
+                  ? { backgroundColor: testResult.ok ? colors.syncGood : colors.syncWarning }
+                  : isTestingConnection
+                  ? { backgroundColor: colors.syncAdjusting }
+                  : undefined,
+              ]}
+            />
             <View style={{ flex: 1 }}>
-              <Text style={styles.serverLabel}>WiFi Signaling Server</Text>
+              <View style={styles.serverHeaderRow}>
+                <Text style={styles.serverLabel}>Signaling Server</Text>
+                <View style={styles.serverTypeBadge}>
+                  <Text style={styles.serverTypeBadgeText}>
+                    {isRemoteServer ? '🌐 Cloud' : '🏠 Local LAN'}
+                  </Text>
+                </View>
+              </View>
               <Text style={styles.serverUrlText} numberOfLines={1}>
                 {serverUrl}
               </Text>
+              {testResult && (
+                <Text
+                  style={[
+                    styles.testResultStatusText,
+                    { color: testResult.ok ? colors.syncGood : colors.syncWarning },
+                  ]}
+                  numberOfLines={1}
+                >
+                  {testResult.ok ? `✓ ${testResult.message}` : `✗ ${testResult.message}`}
+                </Text>
+              )}
             </View>
+            <TouchableOpacity
+              style={styles.testBtn}
+              onPress={() => handleTestConnection()}
+              disabled={isTestingConnection}
+            >
+              {isTestingConnection ? (
+                <ActivityIndicator size="small" color={colors.accent} />
+              ) : (
+                <Text style={styles.testBtnText}>Test</Text>
+              )}
+            </TouchableOpacity>
             <TouchableOpacity
               style={styles.serverEditBtn}
               onPress={() => {
@@ -117,24 +204,72 @@ export const HomeScreen: React.FC<Props> = ({
             </TouchableOpacity>
           </View>
 
+          {/* Render Free-Tier Cold-Start Notice */}
+          {testNotice && (
+            <View style={styles.coldStartBanner}>
+              <ActivityIndicator size="small" color="#F59E0B" style={{ marginRight: 8 }} />
+              <Text style={styles.coldStartText}>{testNotice}</Text>
+            </View>
+          )}
+
           {isServerEditOpen && (
             <View style={styles.serverEditForm}>
               <Text style={styles.inputHelp}>
-                Enter the IP address shown in your server terminal:
+                Choose a preset or enter a custom server URL (Render or LAN IP):
               </Text>
+
+              {/* Quick Presets */}
+              <View style={styles.presetRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.presetBtn,
+                    tempServerUrl === DEFAULT_RENDER_SERVER_URL && styles.presetBtnActive,
+                  ]}
+                  onPress={() => setTempServerUrl(DEFAULT_RENDER_SERVER_URL)}
+                >
+                  <Text
+                    style={[
+                      styles.presetBtnText,
+                      tempServerUrl === DEFAULT_RENDER_SERVER_URL && styles.presetBtnTextActive,
+                    ]}
+                  >
+                    🌐 Render Cloud
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.presetBtn,
+                    tempServerUrl.includes('192.168.') && styles.presetBtnActive,
+                  ]}
+                  onPress={() => setTempServerUrl(DEFAULT_LOCAL_SERVER_URL)}
+                >
+                  <Text
+                    style={[
+                      styles.presetBtnText,
+                      tempServerUrl.includes('192.168.') && styles.presetBtnTextActive,
+                    ]}
+                  >
+                    🏠 Local WiFi
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
               <TextInput
                 style={styles.serverInput}
                 value={tempServerUrl}
                 onChangeText={setTempServerUrl}
-                placeholder="http://192.168.1.50:4000"
+                placeholder="https://syncplay-7qwj.onrender.com"
                 placeholderTextColor={colors.textMuted}
                 autoCapitalize="none"
               />
               <TouchableOpacity
                 style={styles.saveServerBtn}
                 onPress={handleSaveServerUrl}
+                disabled={isTestingConnection}
               >
-                <Text style={styles.saveServerBtnText}>Update Server URL</Text>
+                <Text style={styles.saveServerBtnText}>
+                  {isTestingConnection ? 'Testing...' : 'Save & Test Connection'}
+                </Text>
               </TouchableOpacity>
             </View>
           )}
@@ -284,6 +419,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
   },
+  serverHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
   serverStatusDot: {
     width: 10,
     height: 10,
@@ -297,11 +436,45 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     textTransform: 'uppercase',
   },
+  serverTypeBadge: {
+    backgroundColor: 'rgba(99, 102, 241, 0.15)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    marginLeft: 6,
+  },
+  serverTypeBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: colors.accent,
+  },
   serverUrlText: {
     fontSize: 13,
     color: colors.text,
     fontWeight: '500',
     marginTop: 2,
+  },
+  testResultStatusText: {
+    fontSize: 11,
+    fontWeight: '600',
+    marginTop: 3,
+  },
+  testBtn: {
+    backgroundColor: colors.cardActive,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    marginRight: 6,
+    minWidth: 46,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  testBtnText: {
+    fontSize: 12,
+    color: colors.accent,
+    fontWeight: '700',
   },
   serverEditBtn: {
     backgroundColor: colors.cardActive,
@@ -316,6 +489,24 @@ const styles = StyleSheet.create({
     color: colors.accent,
     fontWeight: '600',
   },
+  coldStartBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(245, 158, 11, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.3)',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginTop: 10,
+  },
+  coldStartText: {
+    fontSize: 12,
+    color: '#F59E0B',
+    flex: 1,
+    fontWeight: '500',
+    lineHeight: 16,
+  },
   serverEditForm: {
     marginTop: 12,
     paddingTop: 12,
@@ -325,7 +516,34 @@ const styles = StyleSheet.create({
   inputHelp: {
     fontSize: 11,
     color: colors.textMuted,
-    marginBottom: 6,
+    marginBottom: 8,
+  },
+  presetRow: {
+    flexDirection: 'row',
+    marginBottom: 10,
+  },
+  presetBtn: {
+    flex: 1,
+    paddingVertical: 7,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    backgroundColor: colors.cardActive,
+    alignItems: 'center',
+    marginRight: 6,
+  },
+  presetBtnActive: {
+    borderColor: colors.accent,
+    backgroundColor: 'rgba(99, 102, 241, 0.18)',
+  },
+  presetBtnText: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    fontWeight: '600',
+  },
+  presetBtnTextActive: {
+    color: colors.accent,
+    fontWeight: '700',
   },
   serverInput: {
     backgroundColor: colors.cardActive,

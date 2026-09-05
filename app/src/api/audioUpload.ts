@@ -5,12 +5,22 @@
 
 import * as DocumentPicker from 'expo-document-picker';
 import { Track } from '../types';
+import { normalizeServerUrl } from './serverConfig';
 
 export async function fetchSampleTracks(serverUrl: string): Promise<Track[]> {
   try {
-    const res = await fetch(`${serverUrl}/api/samples`, { method: 'GET' });
+    const cleanUrl = normalizeServerUrl(serverUrl);
+    const res = await fetch(`${cleanUrl}/api/samples`, { method: 'GET' });
     if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-    const data = await res.json();
+    const data: Track[] = await res.json();
+
+    // If remote server is HTTPS, ensure sample URLs are also HTTPS
+    if (cleanUrl.startsWith('https://')) {
+      return data.map((track) => ({
+        ...track,
+        url: track.url.replace(/^http:\/\//i, 'https://'),
+      }));
+    }
     return data;
   } catch (err) {
     console.warn('Failed to fetch sample tracks:', err);
@@ -40,7 +50,8 @@ export async function pickAndUploadAudioFile(serverUrl: string): Promise<Track |
       type: asset.mimeType || 'audio/mpeg',
     });
 
-    const res = await fetch(`${serverUrl}/upload`, {
+    const cleanUrl = normalizeServerUrl(serverUrl);
+    const res = await fetch(`${cleanUrl}/upload`, {
       method: 'POST',
       body: formData,
       headers: {
@@ -54,8 +65,12 @@ export async function pickAndUploadAudioFile(serverUrl: string): Promise<Track |
 
     const data = await res.json();
     if (data.success && data.file) {
+      let fileUrl = data.file.url;
+      if (cleanUrl.startsWith('https://')) {
+        fileUrl = fileUrl.replace(/^http:\/\//i, 'https://');
+      }
       return {
-        url: data.file.url,
+        url: fileUrl,
         title: asset.name || 'Local Audio Track',
         artist: 'Host Device',
         durationMs: 0, // Duration will be detected when loaded in expo-av

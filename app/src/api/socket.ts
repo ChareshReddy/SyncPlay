@@ -6,10 +6,11 @@
 import { io, Socket } from 'socket.io-client';
 import { clockSync } from '../sync/ClockSync';
 import { ConnectionState } from '../types';
+import { normalizeServerUrl, DEFAULT_RENDER_SERVER_URL } from './serverConfig';
 
 class SocketService {
   private socket: Socket | null = null;
-  private currentServerUrl: string = 'http://192.168.0.105:4000';
+  private currentServerUrl: string = DEFAULT_RENDER_SERVER_URL;
   private connectionStateListeners: Array<(state: ConnectionState) => void> = [];
   private reconnectListeners: Array<(socket: Socket) => void> = [];
 
@@ -20,11 +21,7 @@ class SocketService {
   }
 
   public setServerUrl(url: string) {
-    let clean = (url || '').trim();
-    if (clean && !clean.startsWith('http://') && !clean.startsWith('https://')) {
-      clean = `http://${clean}`;
-    }
-    this.currentServerUrl = clean;
+    this.currentServerUrl = normalizeServerUrl(url);
   }
 
   public onConnectionStateChange(cb: (state: ConnectionState) => void) {
@@ -67,12 +64,12 @@ class SocketService {
 
     return new Promise((resolve, reject) => {
       const socket = io(this.currentServerUrl, {
-        transports: ['websocket'],
+        transports: ['websocket', 'polling'],
         reconnection: true,
         reconnectionAttempts: Infinity, // Keep attempting until manual cancel or 15s window
         reconnectionDelay: 1000,
-        reconnectionDelayMax: 4000,
-        timeout: 10000,
+        reconnectionDelayMax: 5000,
+        timeout: 20000,
       });
 
       socket.on('connect', () => {
