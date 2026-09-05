@@ -2,6 +2,11 @@
 
 SyncPlay turns multiple smartphones into a synchronized multi-speaker sound system over local WiFi. One host phone controls playback (play, pause, seek, audio selection), and all connected guest phones play the exact same audio in lockstep with sub-100ms sync drift.
 
+### Core Modes:
+1. **File-Based Synced Playback**: Play local audio files or built-in test tracks synchronized across all phones with Cristian's algorithm NTP clock sync and micro-rate pitch correction.
+2. **Live System Audio Capture & Relay (Beta)**: Capture internal phone audio directly (YouTube, games, browser, media apps) on Android 10+ via `AudioPlaybackCaptureConfiguration` and broadcast in real time with an adaptive low-latency jitter buffer.
+3. **Manual Left/Right Speaker Assignment**: Assign any connected guest phone as **Left**, **Right**, or **Both (Center)** speaker with stereo channel splitting across both file sync and live streaming modes.
+
 Unlike AmpMe, SyncPlay has **no deceptive weekly auto-renewing subscriptions, no hidden trials, and no cloud surveillance**.
 
 ---
