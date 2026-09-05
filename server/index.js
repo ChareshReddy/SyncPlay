@@ -239,15 +239,71 @@ io.on('connection', (socket) => {
    */
   socket.on('room:get-state', ({ roomCode }, callback) => {
     const state = roomManager.getPlaybackState(roomCode);
-    if (state && typeof callback === 'function') {
+    const room = roomManager.rooms.get((roomCode || '').toUpperCase().trim());
+    if (state && room && typeof callback === 'function') {
       callback({
         success: true,
+        mode: room.mode || 'file',
+        streamMetadata: room.streamMetadata || null,
         currentTrack: state.currentTrack,
         playbackState: state.playbackState,
         serverTimestamp: Date.now(),
       });
     } else if (typeof callback === 'function') {
       callback({ success: false, error: 'Room not found' });
+    }
+  });
+
+  /**
+   * Host starts live audio stream relay
+   */
+  socket.on('stream:start', ({ metadata }, callback) => {
+    const result = roomManager.setRoomMode(socket.id, 'live_stream', metadata);
+    if (result) {
+      // Broadcast to room that live stream started
+      io.to(result.roomCode).emit('room:stream-started', {
+        mode: 'live_stream',
+        metadata: result.streamMetadata,
+        room: result.summary,
+      });
+      if (typeof callback === 'function') {
+        callback({ success: true, room: result.summary });
+      }
+    } else {
+      if (typeof callback === 'function') {
+        callback({ success: false, error: 'Only host can start live stream' });
+      }
+    }
+  });
+
+  /**
+   * Host sends raw live audio chunk (relayed immediately to all guests in room)
+   */
+  socket.on('stream:chunk', (chunkData) => {
+    const room = roomManager.getRoomBySocket(socket.id);
+    if (room && room.hostSocketId === socket.id && room.mode === 'live_stream') {
+      // Broadcast directly to guests with zero latency
+      socket.to(room.code).emit('stream:chunk', chunkData);
+    }
+  });
+
+  /**
+   * Host stops live audio stream relay
+   */
+  socket.on('stream:stop', (callback) => {
+    const result = roomManager.setRoomMode(socket.id, 'file');
+    if (result) {
+      io.to(result.roomCode).emit('room:stream-stopped', {
+        mode: 'file',
+        room: result.summary,
+      });
+      if (typeof callback === 'function') {
+        callback({ success: true, room: result.summary });
+      }
+    } else {
+      if (typeof callback === 'function') {
+        callback({ success: false, error: 'Failed to stop live stream' });
+      }
     }
   });
 

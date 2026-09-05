@@ -1,3 +1,5 @@
+export type RoomMode = 'file' | 'live_stream';
+
 export interface Device {
   socketId: string;
   deviceName: string;
@@ -18,6 +20,26 @@ export interface PlaybackState {
   serverTimestamp: number;
 }
 
+export interface StreamMetadata {
+  sampleRate: number;
+  channels: number;
+  bitDepth: number;
+}
+
+export interface AudioChunk {
+  data: string; // base64 encoded PCM
+  timestamp: number;
+  seq: number;
+  rms: number;
+}
+
+export interface StreamStats {
+  bufferDelayMs: number;
+  packetLossPercent: number;
+  framesReceived: number;
+  currentRms: number;
+}
+
 export interface RoomState {
   code: string;
   createdAt: number;
@@ -27,6 +49,8 @@ export interface RoomState {
   maxDevices: number;
   totalDevices: number;
   guests: Device[];
+  mode: RoomMode;
+  streamMetadata: StreamMetadata | null;
   currentTrack: Track | null;
   playbackState: PlaybackState;
 }

@@ -1,7 +1,7 @@
 /**
  * SyncPlay - Room & Synchronization State Context
  * Orchestrates real-time room signaling, audio playback, host failover,
- * guest auto-reconnection, and monetization gating.
+ * guest auto-reconnection, monetization gating, and live system audio relay.
  */
 
 import React, { createContext, useContext, useEffect, useState, useRef } from 'react';
@@ -10,13 +10,16 @@ import { socketService } from '../api/socket';
 import { clockSync } from '../sync/ClockSync';
 import { audioManager } from '../audio/AudioManager';
 import { syncEngine } from '../sync/SyncEngine';
+import { liveStreamManager } from '../audio/LiveStreamManager';
 import { fetchSampleTracks } from '../api/audioUpload';
 import {
   CapacityAlert,
   ConnectionState,
   Device,
   PlaybackState,
+  RoomMode,
   RoomState,
+  StreamStats,
   SyncStatus,
   Track,
 } from '../types';
@@ -29,6 +32,7 @@ interface RoomContextType {
   connectionState: ConnectionState;
   isHost: boolean;
   room: RoomState | null;
+  roomMode: RoomMode;
   currentTrack: Track | null;
   playbackState: PlaybackState;
   syncStatus: SyncStatus;
@@ -47,6 +51,15 @@ interface RoomContextType {
   capacityAlert: CapacityAlert | null;
   dismissCapacityAlert: () => void;
   upgradeToPro: () => Promise<boolean>;
+  // Live System Audio Streaming
+  isLiveStreaming: boolean;
+  startLiveStream: () => Promise<boolean>;
+  stopLiveStream: () => Promise<void>;
+  drmWarning: string | null;
+  dismissDrmWarning: () => void;
+  streamBufferMs: number;
+  setStreamBufferMs: (ms: number) => void;
+  streamStats: StreamStats | null;
   // Playback & Room Actions
   createRoom: (isPro?: boolean) => Promise<boolean>;
   joinRoom: (code: string, customServerUrl?: string) => Promise<{ success: boolean; error?: string; code?: string }>;
@@ -68,6 +81,7 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
   const [isHost, setIsHost] = useState<boolean>(false);
   const [room, setRoom] = useState<RoomState | null>(null);
+  const [roomMode, setRoomMode] = useState<RoomMode>('file');
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const [playbackState, setPlaybackState] = useState<PlaybackState>({
     isPlaying: false,
@@ -95,12 +109,20 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // Monetization Gating
   const [capacityAlert, setCapacityAlert] = useState<CapacityAlert | null>(null);
 
+  // Live System Audio Relay State
+  const [isLiveStreaming, setIsLiveStreaming] = useState<boolean>(false);
+  const [drmWarning, setDrmWarning] = useState<string | null>(null);
+  const [streamBufferMs, setStreamBufferMsState] = useState<number>(150);
+  const [streamStats, setStreamStats] = useState<StreamStats | null>(null);
+
   const hostHeartbeatTimer = useRef<any>(null);
   const reconnectTimeoutTimer = useRef<any>(null);
   const isHostRef = useRef<boolean>(false);
   isHostRef.current = isHost;
   const roomRef = useRef<RoomState | null>(null);
   roomRef.current = room;
+  const roomModeRef = useRef<RoomMode>('file');
+  roomModeRef.current = roomMode;
   const deviceNameRef = useRef<string>(deviceName);
   deviceNameRef.current = deviceName;
 
@@ -132,6 +154,27 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     syncEngine.setStatusListener((status) => {
       setSyncStatus(status);
+    });
+  }, []);
+
+  // Live stream manager listeners
+  useEffect(() => {
+    // When host captures a chunk, relay over socket
+    liveStreamManager.onChunkReady((chunk) => {
+      const socket = socketService.getSocket();
+      if (socket && socket.connected && isHostRef.current && roomModeRef.current === 'live_stream') {
+        socket.emit('stream:chunk', chunk);
+      }
+    });
+
+    // When DRM silence is detected
+    liveStreamManager.onDrmBlocked((msg) => {
+      setDrmWarning(msg);
+    });
+
+    // When stream stats update
+    liveStreamManager.onStats((stats) => {
+      setStreamStats(stats);
     });
   }, []);
 
@@ -193,7 +236,15 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setIsHost(res.isHost);
             isHostRef.current = res.isHost;
 
-            if (res.room.currentTrack) {
+            const mode: RoomMode = res.room.mode || 'file';
+            setRoomMode(mode);
+            roomModeRef.current = mode;
+
+            if (mode === 'live_stream') {
+              // Reconnect during active live stream: start receiver directly
+              await audioManager.pause();
+              await liveStreamManager.startGuestReceiver();
+            } else if (res.room.currentTrack) {
               setCurrentTrack(res.room.currentTrack);
               const { playbackState: hostState } = res.room;
               setPlaybackState(hostState);
@@ -272,10 +323,10 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   /**
    * Host Heartbeat Loop:
-   * While playing, broadcasts current position every 500ms
+   * While playing file audio, broadcasts current position every 500ms
    */
   useEffect(() => {
-    if (isHost && playbackState.isPlaying) {
+    if (isHost && roomMode === 'file' && playbackState.isPlaying) {
       if (hostHeartbeatTimer.current) clearInterval(hostHeartbeatTimer.current);
       hostHeartbeatTimer.current = setInterval(async () => {
         const status = await audioManager.getStatus();
@@ -300,7 +351,7 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => {
       if (hostHeartbeatTimer.current) clearInterval(hostHeartbeatTimer.current);
     };
-  }, [isHost, playbackState.isPlaying]);
+  }, [isHost, roomMode, playbackState.isPlaying]);
 
   /**
    * Setup socket event listeners for the room
@@ -314,6 +365,9 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
     socket.off('room:guest-latency-updated');
     socket.off('room:capacity-limit-reached');
     socket.off('room:pro-upgraded');
+    socket.off('room:stream-started');
+    socket.off('room:stream-stopped');
+    socket.off('stream:chunk');
 
     // New device joined
     socket.on('room:device-joined', ({ device, totalDevices }: { device: Device; totalDevices: number }) => {
@@ -343,10 +397,12 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setPlaybackState(newState);
       setRoom((prev) => (prev ? { ...prev, currentTrack: track, playbackState: newState } : null));
 
-      // Load audio on device
-      await audioManager.loadTrack(track.url, newState.positionMs, newState.isPlaying);
-      if (!isHostRef.current) {
-        syncEngine.handleSyncState(newState);
+      // Load audio on device if in file mode
+      if (roomModeRef.current === 'file') {
+        await audioManager.loadTrack(track.url, newState.positionMs, newState.isPlaying);
+        if (!isHostRef.current) {
+          syncEngine.handleSyncState(newState);
+        }
       }
     });
 
@@ -355,9 +411,41 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setPlaybackState(newState);
       setRoom((prev) => (prev ? { ...prev, playbackState: newState } : null));
 
-      // Guest aligns local playback
-      if (!isHostRef.current) {
+      if (!isHostRef.current && roomModeRef.current === 'file') {
         syncEngine.handleSyncState(newState);
+      }
+    });
+
+    // Live Stream Started
+    socket.on('room:stream-started', async ({ metadata, room: updatedRoom }: any) => {
+      setRoomMode('live_stream');
+      roomModeRef.current = 'live_stream';
+      if (updatedRoom) setRoom(updatedRoom);
+
+      if (!isHostRef.current) {
+        // Pause any existing file audio
+        await audioManager.pause();
+        // Start streaming receiver
+        await liveStreamManager.startGuestReceiver();
+      }
+    });
+
+    // Live Stream Stopped
+    socket.on('room:stream-stopped', async ({ room: updatedRoom }: any) => {
+      setRoomMode('file');
+      roomModeRef.current = 'file';
+      setIsLiveStreaming(false);
+      if (updatedRoom) setRoom(updatedRoom);
+
+      if (!isHostRef.current) {
+        await liveStreamManager.stopGuestReceiver();
+      }
+    });
+
+    // Incoming Live Stream Chunk (Guest)
+    socket.on('stream:chunk', (chunk: any) => {
+      if (!isHostRef.current && roomModeRef.current === 'live_stream') {
+        liveStreamManager.handleIncomingChunk(chunk);
       }
     });
 
@@ -407,6 +495,8 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
             isHostRef.current = true;
             setRoom(res.room);
             roomRef.current = res.room;
+            setRoomMode(res.room.mode || 'file');
+            roomModeRef.current = res.room.mode || 'file';
             setCurrentTrack(res.room.currentTrack);
             setPlaybackState(res.room.playbackState);
             resolve(true);
@@ -444,11 +534,16 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
               isHostRef.current = res.isHost;
               setRoom(res.room);
               roomRef.current = res.room;
-              setCurrentTrack(res.room.currentTrack);
-              setPlaybackState(res.room.playbackState);
 
-              // If room already has a track playing, join mid-song!
-              if (res.room.currentTrack) {
+              const mode: RoomMode = res.room.mode || 'file';
+              setRoomMode(mode);
+              roomModeRef.current = mode;
+
+              if (mode === 'live_stream') {
+                // Join mid-stream: immediately start receiving live stream
+                await liveStreamManager.startGuestReceiver();
+              } else if (res.room.currentTrack) {
+                // Join mid-song file playback
                 const currentServerTime = clockSync.toServerTime(Date.now());
                 const elapsed = Math.max(0, currentServerTime - res.room.playbackState.serverTimestamp);
                 const targetPos = res.room.playbackState.positionMs + (res.room.playbackState.isPlaying ? elapsed : 0);
@@ -476,6 +571,75 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch (e: any) {
       return { success: false, error: e.message || 'Connection error' };
     }
+  };
+
+  // Start Live System Audio Capture (Host)
+  const startLiveStream = async (): Promise<boolean> => {
+    if (!isHost || !room) return false;
+    const socket = socketService.getSocket();
+    if (!socket || !socket.connected) return false;
+
+    try {
+      // Pause any existing file playback
+      if (playbackState.isPlaying) {
+        await togglePlayPause();
+      }
+
+      // Start host audio capture
+      const success = await liveStreamManager.startHostCapture();
+      if (!success) return false;
+
+      setIsLiveStreaming(true);
+      setRoomMode('live_stream');
+      roomModeRef.current = 'live_stream';
+
+      // Inform server of stream start
+      return new Promise((resolve) => {
+        socket.emit(
+          'stream:start',
+          {
+            metadata: { sampleRate: 48000, channels: 2, bitDepth: 16 },
+          },
+          (res: any) => {
+            if (res && res.success) {
+              setRoom(res.room);
+              resolve(true);
+            } else {
+              resolve(false);
+            }
+          }
+        );
+      });
+    } catch (err: any) {
+      console.error('startLiveStream error:', err);
+      throw err;
+    }
+  };
+
+  // Stop Live System Audio Capture (Host)
+  const stopLiveStream = async (): Promise<void> => {
+    await liveStreamManager.stopHostCapture();
+    setIsLiveStreaming(false);
+    setRoomMode('file');
+    roomModeRef.current = 'file';
+
+    const socket = socketService.getSocket();
+    if (socket && socket.connected) {
+      socket.emit('stream:stop', (res: any) => {
+        if (res && res.room) {
+          setRoom(res.room);
+        }
+      });
+    }
+  };
+
+  const setStreamBufferMs = (ms: number) => {
+    setStreamBufferMsState(ms);
+    liveStreamManager.setBufferDelay(ms);
+  };
+
+  const dismissDrmWarning = () => {
+    setDrmWarning(null);
   };
 
   const upgradeToPro = async (): Promise<boolean> => {
@@ -507,16 +671,23 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     syncEngine.stopPeriodicCheck();
     await audioManager.unload();
+    await liveStreamManager.stopHostCapture();
+    await liveStreamManager.stopGuestReceiver();
+
     setIsHost(false);
     isHostRef.current = false;
     setRoom(null);
     roomRef.current = null;
+    setRoomMode('file');
+    roomModeRef.current = 'file';
+    setIsLiveStreaming(false);
     setCurrentTrack(null);
     setPlaybackState({ isPlaying: false, positionMs: 0, serverTimestamp: Date.now() });
     setHostPromotedMessage(null);
     setIsReconnecting(false);
     setReconnectFailed(false);
     setCapacityAlert(null);
+    setDrmWarning(null);
   };
 
   const selectTrack = async (track: Track) => {
@@ -605,6 +776,7 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
         connectionState,
         isHost,
         room,
+        roomMode,
         currentTrack,
         playbackState,
         syncStatus,
@@ -621,6 +793,14 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
         capacityAlert,
         dismissCapacityAlert,
         upgradeToPro,
+        isLiveStreaming,
+        startLiveStream,
+        stopLiveStream,
+        drmWarning,
+        dismissDrmWarning,
+        streamBufferMs,
+        setStreamBufferMs,
+        streamStats,
         createRoom,
         joinRoom,
         leaveRoom,

@@ -288,6 +288,116 @@ async function runTests() {
     guestSockets.forEach((g) => g.disconnect());
     gateHost.disconnect();
 
+    // 10. Live Audio Stream Relay (Start, Chunk Relay, Mid-Stream Join, Drop/Reconnect, Stop)
+    console.log('\n[10] Testing Live Audio Stream Relay...');
+    const streamHost = ioClient(SERVER_URL, { reconnection: false });
+    const streamGuest1 = ioClient(SERVER_URL, { reconnection: false });
+    await new Promise((resolve) => streamHost.on('connect', resolve));
+    await new Promise((resolve) => streamGuest1.on('connect', resolve));
+
+    // Host creates room and guest 1 joins in normal file mode
+    const sRoomRes = await new Promise((resolve) => {
+      streamHost.emit('room:create', { deviceName: 'Streamer Phone' }, resolve);
+    });
+    const sRoomCode = sRoomRes.room.code;
+    await new Promise((resolve) => {
+      streamGuest1.emit('room:join', { roomCode: sRoomCode, deviceName: 'Speaker 1' }, resolve);
+    });
+
+    // 10a: Host starts live stream
+    console.log('  Testing stream:start...');
+    const streamStartOnGuestPromise = new Promise((resolve) => {
+      streamGuest1.on('room:stream-started', (data) => resolve(data));
+    });
+
+    const startAck = await new Promise((resolve) => {
+      streamHost.emit('stream:start', {
+        metadata: { sampleRate: 48000, channels: 2, bitDepth: 16 },
+      }, resolve);
+    });
+    assert(startAck.success === true, 'Host successfully started live stream');
+
+    const guestStreamStartData = await streamStartOnGuestPromise;
+    assert(guestStreamStartData.mode === 'live_stream', 'Guest received room:stream-started with mode live_stream');
+    assert(guestStreamStartData.metadata.sampleRate === 48000, 'Guest received stream metadata (48000Hz)');
+
+    // 10b: Host sends audio chunk -> Guest receives it
+    console.log('  Testing stream:chunk relay...');
+    const chunkPromise = new Promise((resolve) => {
+      streamGuest1.on('stream:chunk', (data) => resolve(data));
+    });
+
+    const mockChunk = {
+      data: 'AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8w',
+      timestamp: Date.now(),
+      seq: 1,
+      rms: 0.35,
+    };
+    streamHost.emit('stream:chunk', mockChunk);
+
+    const receivedChunk = await chunkPromise;
+    assert(receivedChunk.seq === 1, 'Guest 1 received stream chunk seq: 1');
+    assert(receivedChunk.data === mockChunk.data, 'Guest 1 received exact audio chunk data');
+    assert(receivedChunk.rms === 0.35, 'Guest 1 received audio RMS level');
+
+    // 10c: Guest 2 joins mid-stream
+    console.log('  Testing mid-stream guest join...');
+    const streamGuest2 = ioClient(SERVER_URL, { reconnection: false });
+    await new Promise((resolve) => streamGuest2.on('connect', resolve));
+
+    const midJoinRes = await new Promise((resolve) => {
+      streamGuest2.emit('room:join', { roomCode: sRoomCode, deviceName: 'Speaker 2 (Mid-Stream)' }, resolve);
+    });
+    assert(midJoinRes.success === true, 'Guest 2 joined room mid-stream');
+    assert(midJoinRes.room.mode === 'live_stream', 'Guest 2 room summary reflects active live_stream mode');
+    assert(midJoinRes.room.streamMetadata.sampleRate === 48000, 'Guest 2 has streamMetadata immediately');
+
+    // Guest 2 should immediately receive subsequent chunks
+    const chunk2OnGuest2Promise = new Promise((resolve) => {
+      streamGuest2.on('stream:chunk', (data) => resolve(data));
+    });
+    streamHost.emit('stream:chunk', {
+      data: 'CHUNK_TWO_DATA',
+      timestamp: Date.now(),
+      seq: 2,
+      rms: 0.42,
+    });
+    const receivedChunk2 = await chunk2OnGuest2Promise;
+    assert(receivedChunk2.seq === 2, 'Mid-stream joined Guest 2 received next chunk seq: 2 immediately');
+
+    // 10d: Guest 1 disconnects & reconnects during stream
+    console.log('  Testing guest disconnect/reconnect during stream...');
+    streamGuest1.disconnect();
+    await sleep(100);
+
+    const reconnectedGuest1 = ioClient(SERVER_URL, { reconnection: false });
+    await new Promise((resolve) => reconnectedGuest1.on('connect', resolve));
+
+    const reconnState = await new Promise((resolve) => {
+      reconnectedGuest1.emit('room:get-state', { roomCode: sRoomCode }, resolve);
+    });
+    assert(reconnState.success === true, 'Reconnecting guest queried state');
+    assert(reconnState.mode === 'live_stream', 'Reconnecting guest confirmed active live_stream mode');
+
+    // 10e: Host stops live stream
+    console.log('  Testing stream:stop...');
+    const stopPromiseOnGuest2 = new Promise((resolve) => {
+      streamGuest2.on('room:stream-stopped', (data) => resolve(data));
+    });
+
+    const stopAck = await new Promise((resolve) => {
+      streamHost.emit('stream:stop', resolve);
+    });
+    assert(stopAck.success === true, 'Host successfully stopped live stream');
+
+    const stopData = await stopPromiseOnGuest2;
+    assert(stopData.mode === 'file', 'Guest received room:stream-stopped reverting mode to file');
+
+    // Clean up
+    streamHost.disconnect();
+    streamGuest2.disconnect();
+    reconnectedGuest1.disconnect();
+
     console.log(`\n========================================`);
     console.log(`TEST RESULTS: ${passed} PASSED, ${failed} FAILED`);
     console.log(`========================================\n`);

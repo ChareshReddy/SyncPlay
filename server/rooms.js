@@ -49,6 +49,8 @@ class RoomManager {
       maxDevices: this.MAX_DEVICES_PER_ROOM,
       guests: new Map(), // socketId -> { socketId, deviceName, latencyMs, joinedAt }
       currentTrack: null, // { url, title, artist, durationMs }
+      mode: 'file', // 'file' | 'live_stream'
+      streamMetadata: null, // { sampleRate, channels, bitDepth }
       playbackState: {
         isPlaying: false,
         positionMs: 0,
@@ -274,8 +276,36 @@ class RoomManager {
       maxDevices: room.isPro ? 999 : room.maxDevices,
       totalDevices: 1 + guestList.length,
       guests: guestList,
+      mode: room.mode || 'file',
+      streamMetadata: room.streamMetadata || null,
       currentTrack: room.currentTrack,
       playbackState: room.playbackState,
+    };
+  }
+
+  /**
+   * Switches room between 'file' and 'live_stream' modes (only callable by Host)
+   */
+  setRoomMode(socketId, mode, streamMetadata = null) {
+    const roomCode = this.socketToRoom.get(socketId);
+    if (!roomCode) return null;
+
+    const room = this.rooms.get(roomCode);
+    if (!room || room.hostSocketId !== socketId) return null;
+
+    room.mode = mode === 'live_stream' ? 'live_stream' : 'file';
+    room.streamMetadata = mode === 'live_stream' ? streamMetadata : null;
+
+    if (room.mode === 'live_stream') {
+      // Pause any file playback while streaming live audio
+      room.playbackState.isPlaying = false;
+    }
+
+    return {
+      roomCode,
+      mode: room.mode,
+      streamMetadata: room.streamMetadata,
+      summary: this.getRoomSummary(roomCode),
     };
   }
 

@@ -1,0 +1,7 @@
+{
+  "name": "syncplay-audio-capture",
+  "platforms": ["android"],
+  "android": {
+    "package": "com.syncplay.audiocapture"
+  }
+}
