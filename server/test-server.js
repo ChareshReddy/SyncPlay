@@ -1,6 +1,7 @@
 /**
  * SyncPlay - Server Automated Test Suite
- * Validates endpoints, room creation, socket signaling, clock sync, and host promotion.
+ * Validates endpoints, room creation, socket signaling, clock sync,
+ * host promotion, guest reconnection mid-playback, and monetization gating.
  */
 
 const http = require('http');
@@ -155,6 +156,137 @@ async function runTests() {
     assert(promoRes.newHostSocketId === clientGuest.id, 'Remaining guest was automatically promoted to Host!');
 
     clientGuest.disconnect();
+
+    // 8. Guest Disconnect & Reconnect Mid-Playback with Position Resumption
+    console.log('\n[8] Testing Guest Disconnect & Reconnect Mid-Playback...');
+    const testHost = ioClient(SERVER_URL, { reconnection: false });
+    await new Promise((resolve) => testHost.on('connect', resolve));
+
+    const hostRoomRes = await new Promise((resolve) => {
+      testHost.emit('room:create', { deviceName: 'DJ Host' }, resolve);
+    });
+    const activeRoomCode = hostRoomRes.room.code;
+
+    // Set active playing track at 5000ms
+    testHost.emit('room:set-track', {
+      track: { url: 'http://test/sample.mp3', title: 'Dance Beat', durationMs: 120000 },
+    });
+    testHost.emit('room:sync-state', {
+      isPlaying: true,
+      positionMs: 5000,
+      timestamp: Date.now(),
+    });
+
+    // Guest connects and joins mid-song
+    let reconnectingGuest = ioClient(SERVER_URL, { reconnection: false });
+    await new Promise((resolve) => reconnectingGuest.on('connect', resolve));
+
+    const initialJoinRes = await new Promise((resolve) => {
+      reconnectingGuest.emit('room:join', { roomCode: activeRoomCode, deviceName: 'Synced Speaker 1' }, resolve);
+    });
+    assert(initialJoinRes.success, 'Guest initially joined playing room');
+    assert(initialJoinRes.room.playbackState.positionMs === 5000, 'Guest received initial playback position 5000ms');
+
+    // Simulate network drop on guest
+    console.log('  Simulating guest network drop...');
+    reconnectingGuest.disconnect();
+
+    // Host continues playing and advances position to 8500ms
+    await sleep(200);
+    const hostAdvanceTimestamp = Date.now();
+    testHost.emit('room:sync-state', {
+      isPlaying: true,
+      positionMs: 8500,
+      timestamp: hostAdvanceTimestamp,
+    });
+
+    // Guest reconnects with new socket
+    console.log('  Guest reconnecting with new socket...');
+    const reconnectedGuest = ioClient(SERVER_URL, { reconnection: false });
+    await new Promise((resolve) => reconnectedGuest.on('connect', resolve));
+
+    // Request current state on reconnect
+    const stateOnReconnect = await new Promise((resolve) => {
+      reconnectedGuest.emit('room:get-state', { roomCode: activeRoomCode }, resolve);
+    });
+
+    assert(stateOnReconnect.success, 'Reconnected guest fetched room state via room:get-state');
+    assert(stateOnReconnect.playbackState.isPlaying === true, 'Playback is still playing on reconnect');
+    assert(stateOnReconnect.playbackState.positionMs >= 8500, 'Playback position resumed at >= 8500ms (did NOT restart at 0)');
+
+    // Compute expected target position with clock offset
+    const elapsedSinceState = Date.now() - stateOnReconnect.playbackState.serverTimestamp;
+    const computedTarget = stateOnReconnect.playbackState.positionMs + elapsedSinceState;
+    assert(computedTarget >= 8500, `Computed target seek position (${computedTarget}ms) resumes accurately mid-track`);
+
+    // Clean up
+    reconnectedGuest.disconnect();
+    testHost.disconnect();
+
+    // 9. Monetization Gating (Free 5-Device Limit & Pro Upgrade)
+    console.log('\n[9] Testing Monetization Gating (5-Device Free Limit & Pro Upgrade)...');
+    const gateHost = ioClient(SERVER_URL, { reconnection: false });
+    await new Promise((resolve) => gateHost.on('connect', resolve));
+
+    const gateRoomRes = await new Promise((resolve) => {
+      gateHost.emit('room:create', { deviceName: 'Free Tier Host', isPro: false }, resolve);
+    });
+    const gateRoomCode = gateRoomRes.room.code;
+    assert(gateRoomRes.room.isPro === false, 'Room created in Free Tier (isPro: false)');
+
+    // Listen for capacity alert on Host
+    const capacityAlertPromise = new Promise((resolve) => {
+      gateHost.on('room:capacity-limit-reached', (data) => {
+        resolve(data);
+      });
+    });
+
+    // Connect 4 guests (Total = 5 devices: 1 Host + 4 Guests)
+    const guestSockets = [];
+    for (let i = 1; i <= 4; i++) {
+      const g = ioClient(SERVER_URL, { reconnection: false });
+      await new Promise((resolve) => g.on('connect', resolve));
+      const gJoin = await new Promise((resolve) => {
+        g.emit('room:join', { roomCode: gateRoomCode, deviceName: `Free Guest ${i}` }, resolve);
+      });
+      assert(gJoin.success, `Guest ${i} joined successfully (Total devices: ${1 + i}/5)`);
+      guestSockets.push(g);
+    }
+
+    // Now try to connect a 5th guest (6th device) -> Should be rejected
+    const excessGuest = ioClient(SERVER_URL, { reconnection: false });
+    await new Promise((resolve) => excessGuest.on('connect', resolve));
+
+    const excessJoinRes = await new Promise((resolve) => {
+      excessGuest.emit('room:join', { roomCode: gateRoomCode, deviceName: 'Excess Guest 5' }, resolve);
+    });
+
+    assert(excessJoinRes.success === false, '6th device was rejected in Free Tier');
+    assert(excessJoinRes.code === 'ROOM_FULL_FREE_TIER', 'Error code is ROOM_FULL_FREE_TIER');
+
+    const alertReceived = await capacityAlertPromise;
+    assert(alertReceived.attemptedDeviceName === 'Excess Guest 5', 'Host received room:capacity-limit-reached alert with device name');
+    assert(alertReceived.limit === 5, 'Host alert specifies limit of 5 devices');
+
+    // Host upgrades room to Pro
+    console.log('  Upgrading room to Pro tier...');
+    const upgradeRes = await new Promise((resolve) => {
+      gateHost.emit('room:upgrade-pro', { roomCode: gateRoomCode }, resolve);
+    });
+    assert(upgradeRes.success === true, 'Room upgraded to Pro via room:upgrade-pro');
+    assert(upgradeRes.room.isPro === true, 'Room state reflects isPro: true');
+
+    // 6th device joins again -> Should now succeed
+    const proJoinRes = await new Promise((resolve) => {
+      excessGuest.emit('room:join', { roomCode: gateRoomCode, deviceName: 'Excess Guest 5' }, resolve);
+    });
+    assert(proJoinRes.success === true, '6th device successfully joined after Pro upgrade!');
+    assert(proJoinRes.room.totalDevices === 6, 'Total devices now 6 in Pro room');
+
+    // Clean up
+    excessGuest.disconnect();
+    guestSockets.forEach((g) => g.disconnect());
+    gateHost.disconnect();
 
     console.log(`\n========================================`);
     console.log(`TEST RESULTS: ${passed} PASSED, ${failed} FAILED`);

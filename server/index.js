@@ -162,8 +162,8 @@ io.on('connection', (socket) => {
   /**
    * Host creates a new room
    */
-  socket.on('room:create', ({ deviceName }, callback) => {
-    const room = roomManager.createRoom(socket.id, deviceName);
+  socket.on('room:create', ({ deviceName, isPro }, callback) => {
+    const room = roomManager.createRoom(socket.id, deviceName, { isPro });
     socket.join(room.code);
 
     const summary = roomManager.getRoomSummary(room.code);
@@ -195,9 +195,59 @@ io.on('connection', (socket) => {
         callback({ success: true, room: result.room, isHost: result.isHost });
       }
     } else {
-      if (typeof callback === 'function') {
-        callback({ success: false, error: result.error });
+      // If free tier limit was reached, alert the host phone to prompt for upgrade
+      if (result.code === 'ROOM_FULL_FREE_TIER' && result.hostSocketId) {
+        io.to(result.hostSocketId).emit('room:capacity-limit-reached', {
+          attemptedDeviceName: deviceName || 'Guest Device',
+          limit: roomManager.MAX_DEVICES_PER_ROOM,
+          roomCode: result.roomCode,
+        });
       }
+
+      if (typeof callback === 'function') {
+        callback({
+          success: false,
+          code: result.code || 'JOIN_FAILED',
+          error: result.error,
+        });
+      }
+    }
+  });
+
+  /**
+   * Upgrades room to Pro tier (allows unlimited speakers)
+   */
+  socket.on('room:upgrade-pro', ({ roomCode }, callback) => {
+    const summary = roomManager.setPro(roomCode, true);
+    if (summary) {
+      io.to(summary.code).emit('room:pro-upgraded', {
+        isPro: true,
+        room: summary,
+      });
+      if (typeof callback === 'function') {
+        callback({ success: true, room: summary });
+      }
+    } else {
+      if (typeof callback === 'function') {
+        callback({ success: false, error: 'Room not found' });
+      }
+    }
+  });
+
+  /**
+   * Fast state request for reconnecting guests
+   */
+  socket.on('room:get-state', ({ roomCode }, callback) => {
+    const state = roomManager.getPlaybackState(roomCode);
+    if (state && typeof callback === 'function') {
+      callback({
+        success: true,
+        currentTrack: state.currentTrack,
+        playbackState: state.playbackState,
+        serverTimestamp: Date.now(),
+      });
+    } else if (typeof callback === 'function') {
+      callback({ success: false, error: 'Room not found' });
     }
   });
 

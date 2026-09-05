@@ -1,9 +1,10 @@
 /**
  * SyncPlay - Guest Speaker Screen
- * Receives synchronized audio stream, continuously micro-adjusts playback, and monitors WiFi health.
+ * Receives synchronized audio stream, continuously micro-adjusts playback,
+ * handles network drop reconnection overlays, and WiFi health monitoring.
  */
 
-import React from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
@@ -13,6 +14,8 @@ import {
   SafeAreaView,
   StatusBar,
   Alert,
+  ActivityIndicator,
+  Modal,
 } from 'react-native';
 import { useRoom } from '../context/RoomContext';
 import { colors } from '../theme/colors';
@@ -38,8 +41,13 @@ export const GuestScreen: React.FC<Props> = ({ onLeave, onPromotedToHost }) => {
     setIsBoostMode,
     hostPromotedMessage,
     dismissHostPromoted,
+    isReconnecting,
+    reconnectFailed,
+    rejoinSession,
     leaveRoom,
   } = useRoom();
+
+  const [isRejoiningManual, setIsRejoiningManual] = useState(false);
 
   const handleLeavePress = () => {
     Alert.alert('Leave Session', 'Disconnect this speaker from the room?', [
@@ -53,6 +61,18 @@ export const GuestScreen: React.FC<Props> = ({ onLeave, onPromotedToHost }) => {
         },
       },
     ]);
+  };
+
+  const handleManualRejoin = async () => {
+    setIsRejoiningManual(true);
+    const success = await rejoinSession();
+    setIsRejoiningManual(false);
+    if (!success) {
+      Alert.alert(
+        'Rejoin Failed',
+        'Could not reconnect to the room. Make sure the Host is active and you are on the same WiFi.'
+      );
+    }
   };
 
   const roomCode = room?.code || '-----';
@@ -81,6 +101,16 @@ export const GuestScreen: React.FC<Props> = ({ onLeave, onPromotedToHost }) => {
             <Text style={styles.leaveBtnText}>Leave</Text>
           </TouchableOpacity>
         </View>
+
+        {/* Reconnecting Mid-Session Banner */}
+        {isReconnecting && !reconnectFailed && (
+          <View style={styles.reconnectingBanner}>
+            <ActivityIndicator size="small" color={colors.syncAdjusting} style={{ marginRight: 8 }} />
+            <Text style={styles.reconnectingText}>
+              Reconnecting to room... Playback continuing
+            </Text>
+          </View>
+        )}
 
         {/* Host Promotion Notification Banner */}
         {hostPromotedMessage && (
@@ -116,6 +146,45 @@ export const GuestScreen: React.FC<Props> = ({ onLeave, onPromotedToHost }) => {
           maxDevices={room?.maxDevices || 5}
         />
       </ScrollView>
+
+      {/* Disconnected Modal (when 15s retry window expires) */}
+      <Modal
+        visible={reconnectFailed}
+        transparent
+        animationType="fade"
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalBox}>
+            <Text style={styles.modalIcon}>⚠️</Text>
+            <Text style={styles.modalTitle}>Disconnected from Room</Text>
+            <Text style={styles.modalSubtitle}>
+              WiFi connection was interrupted and could not automatically reconnect within 15 seconds.
+            </Text>
+
+            <TouchableOpacity
+              style={styles.rejoinButton}
+              onPress={handleManualRejoin}
+              disabled={isRejoiningManual}
+            >
+              {isRejoiningManual ? (
+                <ActivityIndicator color="#FFFFFF" size="small" />
+              ) : (
+                <Text style={styles.rejoinButtonText}>🔄 Rejoin Room</Text>
+              )}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.modalLeaveBtn}
+              onPress={async () => {
+                await leaveRoom();
+                onLeave();
+              }}
+            >
+              <Text style={styles.modalLeaveBtnText}>Leave to Home</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -183,6 +252,23 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
   },
+  reconnectingBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.syncAdjustingBg,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.syncAdjusting,
+    marginBottom: 10,
+  },
+  reconnectingText: {
+    fontSize: 12,
+    color: colors.syncAdjusting,
+    fontWeight: '700',
+  },
   promotionBanner: {
     backgroundColor: 'rgba(99, 102, 241, 0.25)',
     borderRadius: 12,
@@ -196,5 +282,61 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
     textAlign: 'center',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.85)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  modalBox: {
+    backgroundColor: colors.cardBackground,
+    borderRadius: 20,
+    padding: 24,
+    width: '100%',
+    maxWidth: 340,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+  },
+  modalIcon: {
+    fontSize: 40,
+    marginBottom: 12,
+  },
+  modalTitle: {
+    fontSize: 19,
+    fontWeight: '800',
+    color: colors.text,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  modalSubtitle: {
+    fontSize: 13,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    lineHeight: 18,
+    marginBottom: 24,
+  },
+  rejoinButton: {
+    backgroundColor: colors.buttonPrimary,
+    paddingVertical: 14,
+    borderRadius: 12,
+    width: '100%',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  rejoinButtonText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  modalLeaveBtn: {
+    paddingVertical: 10,
+  },
+  modalLeaveBtnText: {
+    color: colors.textMuted,
+    fontSize: 13,
+    fontWeight: '600',
   },
 });

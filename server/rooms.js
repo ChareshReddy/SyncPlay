@@ -1,6 +1,7 @@
 /**
  * SyncPlay - Room Manager
- * Handles in-memory room state, device capacity, host auto-promotion, and playback tracking.
+ * Handles in-memory room state, device capacity, monetization gating (isPro),
+ * host auto-promotion, and playback tracking.
  */
 
 class RoomManager {
@@ -30,8 +31,11 @@ class RoomManager {
 
   /**
    * Creates a new room with the requesting socket as Host
+   * @param {string} hostSocketId
+   * @param {string} hostDeviceName
+   * @param {object} options - { isPro: boolean }
    */
-  createRoom(hostSocketId, hostDeviceName = 'Host Device') {
+  createRoom(hostSocketId, hostDeviceName = 'Host Device', options = {}) {
     // Clean up any existing room this socket was in
     this.leaveRoom(hostSocketId);
 
@@ -41,6 +45,7 @@ class RoomManager {
       createdAt: Date.now(),
       hostSocketId: hostSocketId,
       hostDeviceName: hostDeviceName,
+      isPro: Boolean(options && options.isPro),
       maxDevices: this.MAX_DEVICES_PER_ROOM,
       guests: new Map(), // socketId -> { socketId, deviceName, latencyMs, joinedAt }
       currentTrack: null, // { url, title, artist, durationMs }
@@ -58,6 +63,18 @@ class RoomManager {
   }
 
   /**
+   * Upgrades a room session to Pro (unlimited devices, remote rooms)
+   */
+  setPro(roomCode, isPro = true) {
+    const normalizedCode = (roomCode || '').toUpperCase().trim();
+    const room = this.rooms.get(normalizedCode);
+    if (!room) return null;
+
+    room.isPro = Boolean(isPro);
+    return this.getRoomSummary(normalizedCode);
+  }
+
+  /**
    * Adds a guest device to an existing room
    */
   joinRoom(roomCode, socketId, deviceName = 'Guest Device') {
@@ -69,11 +86,17 @@ class RoomManager {
     }
 
     // Check device count (Host + Guests)
+    // Free tier = max 5 devices; Pro = unlimited
+    const maxAllowed = room.isPro ? Infinity : room.maxDevices;
     const totalDevices = 1 + room.guests.size;
-    if (totalDevices >= room.maxDevices && !room.guests.has(socketId) && room.hostSocketId !== socketId) {
+
+    if (totalDevices >= maxAllowed && !room.guests.has(socketId) && room.hostSocketId !== socketId) {
       return {
         success: false,
-        error: `Room is full (${room.maxDevices} devices max in free tier). Ask host to remove a device.`,
+        code: 'ROOM_FULL_FREE_TIER',
+        error: `Room is full (${room.maxDevices} devices max in free tier). Ask host to upgrade to Pro.`,
+        roomCode: normalizedCode,
+        hostSocketId: room.hostSocketId,
       };
     }
 
@@ -247,9 +270,22 @@ class RoomManager {
       createdAt: room.createdAt,
       hostSocketId: room.hostSocketId,
       hostDeviceName: room.hostDeviceName,
-      maxDevices: room.maxDevices,
+      isPro: Boolean(room.isPro),
+      maxDevices: room.isPro ? 999 : room.maxDevices,
       totalDevices: 1 + guestList.length,
       guests: guestList,
+      currentTrack: room.currentTrack,
+      playbackState: room.playbackState,
+    };
+  }
+
+  /**
+   * Returns current playback state for fast mid-session re-sync
+   */
+  getPlaybackState(roomCode) {
+    const room = this.rooms.get((roomCode || '').toUpperCase().trim());
+    if (!room) return null;
+    return {
       currentTrack: room.currentTrack,
       playbackState: room.playbackState,
     };

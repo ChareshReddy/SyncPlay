@@ -1,6 +1,7 @@
 /**
  * SyncPlay - Room & Synchronization State Context
- * Orchestrates real-time room signaling, audio playback, host failover, and drift correction.
+ * Orchestrates real-time room signaling, audio playback, host failover,
+ * guest auto-reconnection, and monetization gating.
  */
 
 import React, { createContext, useContext, useEffect, useState, useRef } from 'react';
@@ -11,6 +12,7 @@ import { audioManager } from '../audio/AudioManager';
 import { syncEngine } from '../sync/SyncEngine';
 import { fetchSampleTracks } from '../api/audioUpload';
 import {
+  CapacityAlert,
   ConnectionState,
   Device,
   PlaybackState,
@@ -37,8 +39,17 @@ interface RoomContextType {
   hostPromotedMessage: string | null;
   dismissHostPromoted: () => void;
   builtInSamples: Track[];
-  createRoom: () => Promise<boolean>;
-  joinRoom: (code: string, customServerUrl?: string) => Promise<{ success: boolean; error?: string }>;
+  // Guest Reconnect
+  isReconnecting: boolean;
+  reconnectFailed: boolean;
+  rejoinSession: () => Promise<boolean>;
+  // Monetization Gating
+  capacityAlert: CapacityAlert | null;
+  dismissCapacityAlert: () => void;
+  upgradeToPro: () => Promise<boolean>;
+  // Playback & Room Actions
+  createRoom: (isPro?: boolean) => Promise<boolean>;
+  joinRoom: (code: string, customServerUrl?: string) => Promise<{ success: boolean; error?: string; code?: string }>;
   leaveRoom: () => Promise<void>;
   selectTrack: (track: Track) => Promise<void>;
   togglePlayPause: () => Promise<void>;
@@ -49,6 +60,7 @@ const RoomContext = createContext<RoomContextType | undefined>(undefined);
 
 const STORAGE_KEY_SERVER = '@syncplay_server_url';
 const STORAGE_KEY_DEVICE = '@syncplay_device_name';
+const RECONNECT_TIMEOUT_MS = 15000; // 15s retry window
 
 export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [serverUrl, setServerUrlState] = useState<string>('http://192.168.0.105:4000');
@@ -76,9 +88,21 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [hostPromotedMessage, setHostPromotedMessage] = useState<string | null>(null);
   const [builtInSamples, setBuiltInSamples] = useState<Track[]>([]);
 
+  // Reconnection State
+  const [isReconnecting, setIsReconnecting] = useState<boolean>(false);
+  const [reconnectFailed, setReconnectFailed] = useState<boolean>(false);
+
+  // Monetization Gating
+  const [capacityAlert, setCapacityAlert] = useState<CapacityAlert | null>(null);
+
   const hostHeartbeatTimer = useRef<any>(null);
+  const reconnectTimeoutTimer = useRef<any>(null);
   const isHostRef = useRef<boolean>(false);
   isHostRef.current = isHost;
+  const roomRef = useRef<RoomState | null>(null);
+  roomRef.current = room;
+  const deviceNameRef = useRef<string>(deviceName);
+  deviceNameRef.current = deviceName;
 
   // Load saved preferences
   useEffect(() => {
@@ -111,12 +135,126 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
   }, []);
 
-  // Connection state listener from socketService
+  // Connection state and auto-reconnect handling
   useEffect(() => {
-    return socketService.onConnectionStateChange((state) => {
+    const unsubState = socketService.onConnectionStateChange((state) => {
       setConnectionState(state);
+
+      // If guest socket disconnects mid-session:
+      if (state === 'disconnected' && roomRef.current && !isHostRef.current) {
+        console.log('Guest socket disconnected mid-session. Starting reconnect window...');
+        setIsReconnecting(true);
+        setReconnectFailed(false);
+
+        // Start 15s retry timer. Do NOT stop audio playback!
+        if (reconnectTimeoutTimer.current) clearTimeout(reconnectTimeoutTimer.current);
+        reconnectTimeoutTimer.current = setTimeout(() => {
+          console.warn('Guest reconnect window expired (15s).');
+          setIsReconnecting(false);
+          setReconnectFailed(true);
+        }, RECONNECT_TIMEOUT_MS);
+      }
     });
+
+    const unsubReconnect = socketService.onReconnect(async (socket) => {
+      // If we are a guest in an active room and socket reconnected:
+      if (roomRef.current && !isHostRef.current) {
+        console.log('Guest socket reconnected! Silently re-syncing room state...');
+        if (reconnectTimeoutTimer.current) {
+          clearTimeout(reconnectTimeoutTimer.current);
+          reconnectTimeoutTimer.current = null;
+        }
+
+        await handleGuestSilentRejoin(socket, roomRef.current.code);
+      }
+    });
+
+    return () => {
+      unsubState();
+      unsubReconnect();
+      if (reconnectTimeoutTimer.current) clearTimeout(reconnectTimeoutTimer.current);
+    };
   }, []);
+
+  /**
+   * Silently re-syncs state upon reconnection without restarting playback
+   */
+  const handleGuestSilentRejoin = (socket: any, roomCode: string): Promise<boolean> => {
+    return new Promise((resolve) => {
+      bindRoomEvents(socket);
+
+      socket.emit(
+        'room:join',
+        { roomCode: roomCode.toUpperCase().trim(), deviceName: deviceNameRef.current },
+        async (res: any) => {
+          if (res && res.success) {
+            setRoom(res.room);
+            roomRef.current = res.room;
+            setIsHost(res.isHost);
+            isHostRef.current = res.isHost;
+
+            if (res.room.currentTrack) {
+              setCurrentTrack(res.room.currentTrack);
+              const { playbackState: hostState } = res.room;
+              setPlaybackState(hostState);
+
+              // Calculate exact target position with clock sync
+              const currentServerTime = clockSync.toServerTime(Date.now());
+              const elapsed = Math.max(0, currentServerTime - hostState.serverTimestamp);
+              const targetPositionMs = hostState.positionMs + (hostState.isPlaying ? elapsed : 0);
+
+              // Load or hard seek to target position
+              await audioManager.loadTrack(res.room.currentTrack.url, targetPositionMs, hostState.isPlaying);
+              await audioManager.setPosition(targetPositionMs);
+
+              if (hostState.isPlaying) {
+                await audioManager.play();
+              } else {
+                await audioManager.pause();
+              }
+
+              syncEngine.handleSyncState(hostState);
+            }
+
+            setIsReconnecting(false);
+            setReconnectFailed(false);
+            resolve(true);
+          } else {
+            console.warn('Rejoin failed on reconnect:', res?.error);
+            setIsReconnecting(false);
+            setReconnectFailed(true);
+            resolve(false);
+          }
+        }
+      );
+    });
+  };
+
+  // Manual rejoin action when 15s retry window expired
+  const rejoinSession = async (): Promise<boolean> => {
+    if (!room) return false;
+    setIsReconnecting(true);
+    setReconnectFailed(false);
+
+    // Reset 15s timer
+    if (reconnectTimeoutTimer.current) clearTimeout(reconnectTimeoutTimer.current);
+    reconnectTimeoutTimer.current = setTimeout(() => {
+      setIsReconnecting(false);
+      setReconnectFailed(true);
+    }, RECONNECT_TIMEOUT_MS);
+
+    const result = await joinRoom(room.code);
+    if (result.success) {
+      if (reconnectTimeoutTimer.current) clearTimeout(reconnectTimeoutTimer.current);
+      setIsReconnecting(false);
+      setReconnectFailed(false);
+      return true;
+    } else {
+      setIsReconnecting(false);
+      setReconnectFailed(true);
+      return false;
+    }
+  };
 
   // Fetch sample tracks when serverUrl changes or connects
   const refreshSamples = async (url: string) => {
@@ -174,6 +312,8 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
     socket.off('room:sync-state');
     socket.off('room:host-promoted');
     socket.off('room:guest-latency-updated');
+    socket.off('room:capacity-limit-reached');
+    socket.off('room:pro-upgraded');
 
     // New device joined
     socket.on('room:device-joined', ({ device, totalDevices }: { device: Device; totalDevices: number }) => {
@@ -241,19 +381,32 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { ...prev, guests: updatedGuests };
       });
     });
+
+    // Capacity limit reached alert (Host only)
+    socket.on('room:capacity-limit-reached', (data: CapacityAlert) => {
+      console.log('Capacity limit reached alert:', data);
+      setCapacityAlert(data);
+    });
+
+    // Room upgraded to Pro
+    socket.on('room:pro-upgraded', ({ room: updatedRoom }: { isPro: boolean; room: RoomState }) => {
+      setRoom(updatedRoom);
+      setCapacityAlert(null);
+    });
   };
 
-  const createRoom = async (): Promise<boolean> => {
+  const createRoom = async (isPro = false): Promise<boolean> => {
     try {
       const socket = await socketService.connect(serverUrl);
       bindRoomEvents(socket);
 
       return new Promise((resolve) => {
-        socket.emit('room:create', { deviceName }, (res: any) => {
+        socket.emit('room:create', { deviceName, isPro }, (res: any) => {
           if (res && res.success) {
             setIsHost(true);
             isHostRef.current = true;
             setRoom(res.room);
+            roomRef.current = res.room;
             setCurrentTrack(res.room.currentTrack);
             setPlaybackState(res.room.playbackState);
             resolve(true);
@@ -271,7 +424,7 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const joinRoom = async (
     code: string,
     customServerUrl?: string
-  ): Promise<{ success: boolean; error?: string }> => {
+  ): Promise<{ success: boolean; error?: string; code?: string }> => {
     try {
       const targetUrl = customServerUrl || serverUrl;
       if (customServerUrl) {
@@ -290,14 +443,19 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
               setIsHost(res.isHost);
               isHostRef.current = res.isHost;
               setRoom(res.room);
+              roomRef.current = res.room;
               setCurrentTrack(res.room.currentTrack);
               setPlaybackState(res.room.playbackState);
 
               // If room already has a track playing, join mid-song!
               if (res.room.currentTrack) {
+                const currentServerTime = clockSync.toServerTime(Date.now());
+                const elapsed = Math.max(0, currentServerTime - res.room.playbackState.serverTimestamp);
+                const targetPos = res.room.playbackState.positionMs + (res.room.playbackState.isPlaying ? elapsed : 0);
+
                 await audioManager.loadTrack(
                   res.room.currentTrack.url,
-                  res.room.playbackState.positionMs,
+                  targetPos,
                   res.room.playbackState.isPlaying
                 );
                 syncEngine.startPeriodicCheck();
@@ -306,7 +464,11 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
               resolve({ success: true });
             } else {
-              resolve({ success: false, error: res?.error || 'Failed to join room' });
+              resolve({
+                success: false,
+                code: res?.code,
+                error: res?.error || 'Failed to join room',
+              });
             }
           }
         );
@@ -314,6 +476,28 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch (e: any) {
       return { success: false, error: e.message || 'Connection error' };
     }
+  };
+
+  const upgradeToPro = async (): Promise<boolean> => {
+    if (!room) return false;
+    const socket = socketService.getSocket();
+    if (!socket || !socket.connected) return false;
+
+    return new Promise((resolve) => {
+      socket.emit('room:upgrade-pro', { roomCode: room.code }, (res: any) => {
+        if (res && res.success) {
+          setRoom(res.room);
+          setCapacityAlert(null);
+          resolve(true);
+        } else {
+          resolve(false);
+        }
+      });
+    });
+  };
+
+  const dismissCapacityAlert = () => {
+    setCapacityAlert(null);
   };
 
   const leaveRoom = async () => {
@@ -326,9 +510,13 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsHost(false);
     isHostRef.current = false;
     setRoom(null);
+    roomRef.current = null;
     setCurrentTrack(null);
     setPlaybackState({ isPlaying: false, positionMs: 0, serverTimestamp: Date.now() });
     setHostPromotedMessage(null);
+    setIsReconnecting(false);
+    setReconnectFailed(false);
+    setCapacityAlert(null);
   };
 
   const selectTrack = async (track: Track) => {
@@ -427,6 +615,12 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
         hostPromotedMessage,
         dismissHostPromoted,
         builtInSamples,
+        isReconnecting,
+        reconnectFailed,
+        rejoinSession,
+        capacityAlert,
+        dismissCapacityAlert,
+        upgradeToPro,
         createRoom,
         joinRoom,
         leaveRoom,

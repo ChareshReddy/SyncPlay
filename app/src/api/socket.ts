@@ -11,6 +11,7 @@ class SocketService {
   private socket: Socket | null = null;
   private currentServerUrl: string = 'http://192.168.0.105:4000';
   private connectionStateListeners: Array<(state: ConnectionState) => void> = [];
+  private reconnectListeners: Array<(socket: Socket) => void> = [];
 
   constructor() {}
 
@@ -33,8 +34,19 @@ class SocketService {
     };
   }
 
+  public onReconnect(cb: (socket: Socket) => void) {
+    this.reconnectListeners.push(cb);
+    return () => {
+      this.reconnectListeners = this.reconnectListeners.filter((c) => c !== cb);
+    };
+  }
+
   private notifyState(state: ConnectionState) {
     this.connectionStateListeners.forEach((cb) => cb(state));
+  }
+
+  private notifyReconnect(socket: Socket) {
+    this.reconnectListeners.forEach((cb) => cb(socket));
   }
 
   public connect(url?: string): Promise<Socket> {
@@ -57,9 +69,9 @@ class SocketService {
       const socket = io(this.currentServerUrl, {
         transports: ['websocket'],
         reconnection: true,
-        reconnectionAttempts: 15,
+        reconnectionAttempts: Infinity, // Keep attempting until manual cancel or 15s window
         reconnectionDelay: 1000,
-        reconnectionDelayMax: 5000,
+        reconnectionDelayMax: 4000,
         timeout: 10000,
       });
 
@@ -68,6 +80,13 @@ class SocketService {
         this.notifyState('connected');
         clockSync.start(socket);
         resolve(socket);
+      });
+
+      socket.io.on('reconnect', () => {
+        console.log(`Socket reconnected to: ${this.currentServerUrl}`);
+        this.notifyState('connected');
+        clockSync.start(socket);
+        this.notifyReconnect(socket);
       });
 
       socket.on('connect_error', (err) => {
@@ -81,7 +100,7 @@ class SocketService {
         clockSync.stop();
       });
 
-      socket.on('reconnect_attempt', () => {
+      socket.io.on('reconnect_attempt', () => {
         this.notifyState('connecting');
       });
 

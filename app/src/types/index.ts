@@ -23,6 +23,7 @@ export interface RoomState {
   createdAt: number;
   hostSocketId: string;
   hostDeviceName: string;
+  isPro: boolean;
   maxDevices: number;
   totalDevices: number;
   guests: Device[];
@@ -38,6 +39,12 @@ export interface SyncStatus {
   isAdjusting: boolean;
   statusText: string;
   warning: string | null;
+}
+
+export interface CapacityAlert {
+  attemptedDeviceName: string;
+  limit: number;
+  roomCode: string;
 }
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected';
