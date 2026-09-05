@@ -235,6 +235,28 @@ io.on('connection', (socket) => {
   });
 
   /**
+   * Host assigns speaker role ('both' | 'left' | 'right') to a connected guest
+   */
+  socket.on('device:set-role', ({ targetSocketId, role }, callback) => {
+    const result = roomManager.setDeviceRole(socket.id, targetSocketId, role);
+    if (result) {
+      // Broadcast to room that a device's speaker role changed
+      io.to(result.roomCode).emit('device:role-changed', {
+        socketId: result.targetSocketId,
+        role: result.role,
+        room: result.roomSummary,
+      });
+      if (typeof callback === 'function') {
+        callback({ success: true, role: result.role, room: result.roomSummary });
+      }
+    } else {
+      if (typeof callback === 'function') {
+        callback({ success: false, error: 'Failed to assign speaker role. Only host can assign roles.' });
+      }
+    }
+  });
+
+  /**
    * Fast state request for reconnecting guests
    */
   socket.on('room:get-state', ({ roomCode }, callback) => {

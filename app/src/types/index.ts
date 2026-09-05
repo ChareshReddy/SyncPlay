@@ -1,10 +1,12 @@
 export type RoomMode = 'file' | 'live_stream';
+export type SpeakerRole = 'both' | 'left' | 'right';
 
 export interface Device {
   socketId: string;
   deviceName: string;
   latencyMs: number;
   joinedAt: number;
+  speakerRole?: SpeakerRole;
 }
 
 export interface Track {
@@ -38,6 +40,7 @@ export interface StreamStats {
   packetLossPercent: number;
   framesReceived: number;
   currentRms: number;
+  isMonoSource?: boolean;
 }
 
 export interface RoomState {

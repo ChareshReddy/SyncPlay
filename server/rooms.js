@@ -47,7 +47,8 @@ class RoomManager {
       hostDeviceName: hostDeviceName,
       isPro: Boolean(options && options.isPro),
       maxDevices: this.MAX_DEVICES_PER_ROOM,
-      guests: new Map(), // socketId -> { socketId, deviceName, latencyMs, joinedAt }
+      guests: new Map(), // socketId -> { socketId, deviceName, latencyMs, joinedAt, speakerRole }
+      assignedRoles: new Map(), // deviceName -> 'both' | 'left' | 'right' (persists across reconnects)
       currentTrack: null, // { url, title, artist, durationMs }
       mode: 'file', // 'file' | 'live_stream'
       streamMetadata: null, // { sampleRate, channels, bitDepth }
@@ -109,11 +110,13 @@ class RoomManager {
     if (room.hostSocketId === socketId) {
       room.hostDeviceName = deviceName;
     } else {
+      const persistedRole = (room.assignedRoles && room.assignedRoles.get(deviceName)) || 'both';
       room.guests.set(socketId, {
         socketId,
         deviceName,
         latencyMs: 0,
         joinedAt: Date.now(),
+        speakerRole: persistedRole,
       });
     }
 
@@ -254,6 +257,37 @@ class RoomManager {
   }
 
   /**
+   * Assigns speaker role ('both' | 'left' | 'right') to a guest device
+   * Callable only by the Host
+   */
+  setDeviceRole(hostSocketId, targetSocketId, role) {
+    const roomCode = this.socketToRoom.get(hostSocketId);
+    if (!roomCode) return null;
+
+    const room = this.rooms.get(roomCode);
+    if (!room || room.hostSocketId !== hostSocketId) return null;
+
+    const validRoles = ['both', 'left', 'right'];
+    const assignedRole = validRoles.includes(role) ? role : 'both';
+
+    if (room.guests.has(targetSocketId)) {
+      const guest = room.guests.get(targetSocketId);
+      guest.speakerRole = assignedRole;
+      if (!room.assignedRoles) room.assignedRoles = new Map();
+      room.assignedRoles.set(guest.deviceName, assignedRole);
+
+      return {
+        roomCode,
+        targetSocketId,
+        role: assignedRole,
+        roomSummary: this.getRoomSummary(roomCode),
+      };
+    }
+
+    return null;
+  }
+
+  /**
    * Returns a clean JSON summary of the room for clients
    */
   getRoomSummary(roomCode) {
@@ -265,6 +299,7 @@ class RoomManager {
       deviceName: g.deviceName,
       latencyMs: g.latencyMs || 0,
       joinedAt: g.joinedAt,
+      speakerRole: g.speakerRole || 'both',
     }));
 
     return {

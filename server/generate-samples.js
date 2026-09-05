@@ -97,11 +97,16 @@ function generateSamples() {
       pad += (Math.sin(2 * Math.PI * freq * t) + 0.3 * Math.sin(2 * Math.PI * freq * 2 * t)) * 0.08;
     }
 
-    const mixed = click + bass + pad;
-    return [mixed, mixed];
+    // Left Channel: High percussive click + high synth pad
+    const leftChannel = click * 0.9 + pad * 1.2;
+
+    // Right Channel: Deep punchy sub-bass kick + low sub rumble
+    const rightChannel = bass * 1.1 + (chordFreqs[0] ? Math.sin(2 * Math.PI * (chordFreqs[0] / 2) * t) * 0.2 : 0);
+
+    return [leftChannel, rightChannel];
   });
   fs.writeFileSync(path.join(outputDir, 'sync_beat.wav'), beatBuffer);
-  console.log('✓ Created sync_beat.wav');
+  console.log('✓ Created sync_beat.wav (Stereo L/R separated)');
 
   // Track 2: Melodic Synth Groove (16s)
   console.log('Generating Track 2: melodic_groove.wav (16s)...');

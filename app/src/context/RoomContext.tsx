@@ -19,6 +19,7 @@ import {
   PlaybackState,
   RoomMode,
   RoomState,
+  SpeakerRole,
   StreamStats,
   SyncStatus,
   Track,
@@ -43,6 +44,10 @@ interface RoomContextType {
   hostPromotedMessage: string | null;
   dismissHostPromoted: () => void;
   builtInSamples: Track[];
+  // Speaker Role
+  mySpeakerRole: SpeakerRole;
+  isMonoSource: boolean;
+  setDeviceRole: (targetSocketId: string, role: SpeakerRole) => Promise<boolean>;
   // Guest Reconnect
   isReconnecting: boolean;
   reconnectFailed: boolean;
@@ -108,6 +113,10 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Monetization Gating
   const [capacityAlert, setCapacityAlert] = useState<CapacityAlert | null>(null);
+
+  // Speaker Role State
+  const [mySpeakerRole, setMySpeakerRole] = useState<SpeakerRole>('both');
+  const [isMonoSource, setIsMonoSource] = useState<boolean>(false);
 
   // Live System Audio Relay State
   const [isLiveStreaming, setIsLiveStreaming] = useState<boolean>(false);
@@ -176,6 +185,11 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
     liveStreamManager.onStats((stats) => {
       setStreamStats(stats);
     });
+
+    // When mono audio source is detected
+    liveStreamManager.onMonoDetected((isMono) => {
+      setIsMonoSource(isMono);
+    });
   }, []);
 
   // Connection state and auto-reconnect handling
@@ -239,6 +253,14 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
             const mode: RoomMode = res.room.mode || 'file';
             setRoomMode(mode);
             roomModeRef.current = mode;
+
+            // Restore speaker role if previously assigned
+            const myDevice = res.room.guests?.find((g: Device) => g.socketId === socket.id);
+            if (myDevice && myDevice.speakerRole) {
+              setMySpeakerRole(myDevice.speakerRole);
+              await audioManager.setSpeakerRole(myDevice.speakerRole);
+              liveStreamManager.setSpeakerRole(myDevice.speakerRole);
+            }
 
             if (mode === 'live_stream') {
               // Reconnect during active live stream: start receiver directly
@@ -481,6 +503,20 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setRoom(updatedRoom);
       setCapacityAlert(null);
     });
+
+    // Speaker role changed
+    socket.off('device:role-changed');
+    socket.on('device:role-changed', async ({ socketId, role, room: updatedRoom }: { socketId: string; role: SpeakerRole; room: RoomState }) => {
+      if (updatedRoom) {
+        setRoom(updatedRoom);
+        roomRef.current = updatedRoom;
+      }
+      if (socket.id === socketId) {
+        setMySpeakerRole(role);
+        await audioManager.setSpeakerRole(role);
+        liveStreamManager.setSpeakerRole(role);
+      }
+    });
   };
 
   const createRoom = async (isPro = false): Promise<boolean> => {
@@ -538,6 +574,14 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
               const mode: RoomMode = res.room.mode || 'file';
               setRoomMode(mode);
               roomModeRef.current = mode;
+
+              // Check if guest has a preserved/assigned speaker role
+              const myDevice = res.room.guests?.find((g: Device) => g.socketId === socket.id);
+              if (myDevice && myDevice.speakerRole) {
+                setMySpeakerRole(myDevice.speakerRole);
+                await audioManager.setSpeakerRole(myDevice.speakerRole);
+                liveStreamManager.setSpeakerRole(myDevice.speakerRole);
+              }
 
               if (mode === 'live_stream') {
                 // Join mid-stream: immediately start receiving live stream
@@ -664,6 +708,28 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setCapacityAlert(null);
   };
 
+  /**
+   * Host assigns a speaker role to a guest phone
+   */
+  const setDeviceRole = async (targetSocketId: string, role: SpeakerRole): Promise<boolean> => {
+    const socket = socketService.getSocket();
+    if (!socket || !socket.connected || !isHostRef.current) return false;
+
+    return new Promise((resolve) => {
+      socket.emit('device:set-role', { targetSocketId, role }, (res: any) => {
+        if (res && res.success) {
+          if (res.room) {
+            setRoom(res.room);
+            roomRef.current = res.room;
+          }
+          resolve(true);
+        } else {
+          resolve(false);
+        }
+      });
+    });
+  };
+
   const leaveRoom = async () => {
     const socket = socketService.getSocket();
     if (socket && socket.connected) {
@@ -673,6 +739,12 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
     await audioManager.unload();
     await liveStreamManager.stopHostCapture();
     await liveStreamManager.stopGuestReceiver();
+
+    // Reset speaker roles & mono flags
+    setMySpeakerRole('both');
+    setIsMonoSource(false);
+    audioManager.setSpeakerRole('both');
+    liveStreamManager.setSpeakerRole('both');
 
     setIsHost(false);
     isHostRef.current = false;
@@ -787,6 +859,9 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
         hostPromotedMessage,
         dismissHostPromoted,
         builtInSamples,
+        mySpeakerRole,
+        isMonoSource,
+        setDeviceRole,
         isReconnecting,
         reconnectFailed,
         rejoinSession,

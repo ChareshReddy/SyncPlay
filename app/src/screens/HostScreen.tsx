@@ -58,6 +58,7 @@ export const HostScreen: React.FC<Props> = ({ onLeave }) => {
     drmWarning,
     dismissDrmWarning,
     streamStats,
+    setDeviceRole,
   } = useRoom();
 
   const [isQrOpen, setIsQrOpen] = useState(false);
@@ -273,6 +274,7 @@ export const HostScreen: React.FC<Props> = ({ onLeave }) => {
           isHostDevice={true}
           guests={room?.guests || []}
           maxDevices={room?.maxDevices || 5}
+          onSetSpeakerRole={setDeviceRole}
         />
       </ScrollView>
 

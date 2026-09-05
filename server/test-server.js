@@ -393,10 +393,153 @@ async function runTests() {
     const stopData = await stopPromiseOnGuest2;
     assert(stopData.mode === 'file', 'Guest received room:stream-stopped reverting mode to file');
 
-    // Clean up
+    // Clean up live stream test sockets
     streamHost.disconnect();
     streamGuest2.disconnect();
     reconnectedGuest1.disconnect();
+
+    // 11. Stereo Speaker Assignment & Channel Splitting
+    console.log('\n[11] Testing Stereo Speaker Assignment & Channel Splitting...');
+    const stereoHost = ioClient(SERVER_URL, { reconnection: false });
+    const stereoGuest = ioClient(SERVER_URL, { reconnection: false });
+
+    await new Promise((resolve) => stereoHost.on('connect', resolve));
+    await new Promise((resolve) => stereoGuest.on('connect', resolve));
+
+    const stRoomRes = await new Promise((resolve) => {
+      stereoHost.emit('room:create', { deviceName: 'Stereo Host Phone' }, resolve);
+    });
+    const stRoomCode = stRoomRes.room.code;
+
+    const stGuestJoinRes = await new Promise((resolve) => {
+      stereoGuest.emit('room:join', { roomCode: stRoomCode, deviceName: 'Stereo Guest 1' }, resolve);
+    });
+    assert(stGuestJoinRes.success === true, 'Stereo Guest joined room');
+    const guestSocketId = stereoGuest.id;
+    const initialGuest = stGuestJoinRes.room.guests.find((g) => g.socketId === guestSocketId);
+    assert(initialGuest && initialGuest.speakerRole === 'both', 'New guest defaults to role "both"');
+
+    // 11a: Host assigns guest to Left
+    console.log('  Testing host assigning role "left"...');
+    const roleChangedToLeftPromise = new Promise((resolve) => {
+      stereoGuest.on('device:role-changed', (data) => resolve(data));
+    });
+
+    const setRoleLeftAck = await new Promise((resolve) => {
+      stereoHost.emit('device:set-role', { targetSocketId: guestSocketId, role: 'left' }, resolve);
+    });
+    assert(setRoleLeftAck.success === true, 'Host successfully set guest role to "left"');
+    assert(setRoleLeftAck.role === 'left', 'Ack returned role "left"');
+
+    const roleLeftBroadcast = await roleChangedToLeftPromise;
+    assert(roleLeftBroadcast.socketId === guestSocketId, 'Guest received device:role-changed for own socketId');
+    assert(roleLeftBroadcast.role === 'left', 'Broadcast indicated role "left"');
+
+    // 11b: Non-host socket attempting to assign roles is rejected
+    console.log('  Testing unauthorized role change rejection...');
+    const unauthorizedAck = await new Promise((resolve) => {
+      stereoGuest.emit('device:set-role', { targetSocketId: guestSocketId, role: 'right' }, resolve);
+    });
+    assert(unauthorizedAck.success === false, 'Non-host socket is prevented from setting roles');
+
+    // 11c: Host assigns guest to Right
+    console.log('  Testing host assigning role "right"...');
+    const roleChangedToRightPromise = new Promise((resolve) => {
+      stereoGuest.on('device:role-changed', (data) => resolve(data));
+    });
+
+    const setRoleRightAck = await new Promise((resolve) => {
+      stereoHost.emit('device:set-role', { targetSocketId: guestSocketId, role: 'right' }, resolve);
+    });
+    assert(setRoleRightAck.success === true, 'Host successfully set guest role to "right"');
+    assert(setRoleRightAck.role === 'right', 'Ack returned role "right"');
+
+    const roleRightBroadcast = await roleChangedToRightPromise;
+    assert(roleRightBroadcast.role === 'right', 'Guest received broadcast indicating role "right"');
+
+    // 11d: Guest disconnects & reconnects -> previously assigned role persists
+    console.log('  Testing role persistence across guest reconnect...');
+    stereoGuest.disconnect();
+    await sleep(100);
+
+    const stereoReconnectedGuest = ioClient(SERVER_URL, { reconnection: false });
+    await new Promise((resolve) => stereoReconnectedGuest.on('connect', resolve));
+
+    const reconnJoinRes = await new Promise((resolve) => {
+      stereoReconnectedGuest.emit('room:join', { roomCode: stRoomCode, deviceName: 'Stereo Guest 1' }, resolve);
+    });
+    assert(reconnJoinRes.success === true, 'Reconnected guest joined room');
+    const restoredGuest = reconnJoinRes.room.guests.find((g) => g.socketId === stereoReconnectedGuest.id);
+    assert(restoredGuest && restoredGuest.speakerRole === 'right', 'Guest role "right" persisted across disconnect and reconnect');
+
+    // 11e: Verify PCM 16-bit channel extraction math
+    console.log('  Testing PCM 16-bit channel extraction & mono detection math...');
+    function mockProcessChunk(base64Data, role) {
+      const bytes = Buffer.from(base64Data, 'base64');
+      const frameCount = Math.floor(bytes.length / 4);
+      if (frameCount === 0) return { data: base64Data, isMono: false };
+
+      let totalDiff = 0;
+      for (let i = 0; i < frameCount; i++) {
+        const offset = i * 4;
+        const left = bytes.readInt16LE(offset);
+        const right = bytes.readInt16LE(offset + 2);
+        totalDiff += Math.abs(left - right);
+      }
+      const isMono = (totalDiff / frameCount) < 50;
+      if (isMono || role === 'both') {
+        return { data: base64Data, isMono };
+      }
+
+      const out = Buffer.from(bytes);
+      if (role === 'left') {
+        for (let i = 0; i < frameCount; i++) {
+          const offset = i * 4;
+          out.writeInt16LE(out.readInt16LE(offset), offset + 2);
+        }
+      } else if (role === 'right') {
+        for (let i = 0; i < frameCount; i++) {
+          const offset = i * 4;
+          out.writeInt16LE(out.readInt16LE(offset + 2), offset);
+        }
+      }
+      return { data: out.toString('base64'), isMono: false };
+    }
+
+    // Build stereo test buffer: Frame 1: L=5000, R=-5000; Frame 2: L=8000, R=-8000
+    const stereoBuf = Buffer.alloc(8);
+    stereoBuf.writeInt16LE(5000, 0);
+    stereoBuf.writeInt16LE(-5000, 2);
+    stereoBuf.writeInt16LE(8000, 4);
+    stereoBuf.writeInt16LE(-8000, 6);
+    const stereoB64 = stereoBuf.toString('base64');
+
+    // Test role 'left'
+    const leftRes = mockProcessChunk(stereoB64, 'left');
+    const leftOutBuf = Buffer.from(leftRes.data, 'base64');
+    assert(leftOutBuf.readInt16LE(0) === 5000 && leftOutBuf.readInt16LE(2) === 5000, 'Left channel extraction duplicated L to R (5000, 5000)');
+    assert(leftOutBuf.readInt16LE(4) === 8000 && leftOutBuf.readInt16LE(6) === 8000, 'Left channel extraction duplicated L to R (8000, 8000)');
+    assert(leftRes.isMono === false, 'Stereo signal correctly not flagged as mono');
+
+    // Test role 'right'
+    const rightRes = mockProcessChunk(stereoB64, 'right');
+    const rightOutBuf = Buffer.from(rightRes.data, 'base64');
+    assert(rightOutBuf.readInt16LE(0) === -5000 && rightOutBuf.readInt16LE(2) === -5000, 'Right channel extraction duplicated R to L (-5000, -5000)');
+    assert(rightOutBuf.readInt16LE(4) === -8000 && rightOutBuf.readInt16LE(6) === -8000, 'Right channel extraction duplicated R to L (-8000, -8000)');
+
+    // Test mono detection
+    const monoBuf = Buffer.alloc(8);
+    monoBuf.writeInt16LE(4000, 0);
+    monoBuf.writeInt16LE(4000, 2);
+    monoBuf.writeInt16LE(7000, 4);
+    monoBuf.writeInt16LE(7000, 6);
+    const monoB64 = monoBuf.toString('base64');
+    const monoRes = mockProcessChunk(monoB64, 'left');
+    assert(monoRes.isMono === true, 'Mono source accurately detected');
+    assert(monoRes.data === monoB64, 'Mono source falls back to playing full signal normally without silence');
+
+    stereoHost.disconnect();
+    stereoReconnectedGuest.disconnect();
 
     console.log(`\n========================================`);
     console.log(`TEST RESULTS: ${passed} PASSED, ${failed} FAILED`);

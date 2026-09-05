@@ -18,17 +18,21 @@ import {
   DrmBlockedPayload,
 } from '../../modules/syncplay-audio-capture';
 import { JitterBuffer } from './JitterBuffer';
-import { AudioChunk, StreamStats } from '../types';
+import { PcmAudioProcessor } from './PcmAudioProcessor';
+import { AudioChunk, SpeakerRole, StreamStats } from '../types';
 
 export class LiveStreamManager {
   private isCapturing = false;
   private isReceiving = false;
+  private speakerRole: SpeakerRole = 'both';
+  private isMonoSource = false;
   private jitterBuffer: JitterBuffer;
   private playbackLoopTimer: any = null;
   private simulatedCaptureTimer: any = null;
   private onChunkReadyCallback: ((chunk: AudioChunk) => void) | null = null;
   private onDrmBlockedCallback: ((message: string) => void) | null = null;
   private onStatsCallback: ((stats: StreamStats) => void) | null = null;
+  private onMonoDetectedCallback: ((isMono: boolean) => void) | null = null;
   private cleanupNativeListeners: Array<() => void> = [];
 
   constructor() {
@@ -83,6 +87,22 @@ export class LiveStreamManager {
 
   public getBufferDelay(): number {
     return this.jitterBuffer.getTargetDelay();
+  }
+
+  public setSpeakerRole(role: SpeakerRole) {
+    this.speakerRole = role;
+  }
+
+  public getSpeakerRole(): SpeakerRole {
+    return this.speakerRole;
+  }
+
+  public onMonoDetected(cb: (isMono: boolean) => void) {
+    this.onMonoDetectedCallback = cb;
+  }
+
+  public getIsMonoSource(): boolean {
+    return this.isMonoSource;
   }
 
   /**
@@ -149,7 +169,15 @@ export class LiveStreamManager {
     this.playbackLoopTimer = setInterval(() => {
       const chunk = this.jitterBuffer.pop();
       if (chunk && chunk.data) {
-        writeAudioChunk(chunk.data);
+        // Extract channel according to assigned role & check for mono source
+        const { data, isMono } = PcmAudioProcessor.processChunk(chunk.data, this.speakerRole);
+        if (isMono !== this.isMonoSource) {
+          this.isMonoSource = isMono;
+          if (this.onMonoDetectedCallback) {
+            this.onMonoDetectedCallback(isMono);
+          }
+        }
+        writeAudioChunk(data);
       }
     }, 20);
   }

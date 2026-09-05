@@ -4,6 +4,7 @@
  */
 
 import { Audio, AVPlaybackStatus, AVPlaybackStatusSuccess } from 'expo-av';
+import { SpeakerRole } from '../types';
 
 export class AudioManager {
   private sound: Audio.Sound | null = null;
@@ -11,6 +12,7 @@ export class AudioManager {
   private isLoaded = false;
   private currentVolume = 1.0;
   private isBoosted = false;
+  private speakerRole: SpeakerRole = 'both';
   private onStatusUpdateCb: ((status: AVPlaybackStatusSuccess) => void) | null = null;
 
   constructor() {
@@ -68,6 +70,16 @@ export class AudioManager {
 
       this.sound = sound;
       this.isLoaded = true;
+
+      // Apply initial audio pan if assigned
+      if (this.speakerRole !== 'both') {
+        try {
+          await sound.setVolumeAsync(this.getEffectiveVolume(), this.getAudioPan());
+        } catch (e) {
+          // ignore pan error
+        }
+      }
+
       return true;
     } catch (err) {
       console.error('Error loading audio track:', err);
@@ -121,7 +133,7 @@ export class AudioManager {
     this.currentVolume = Math.max(0, Math.min(1.0, volume));
     if (!this.sound || !this.isLoaded) return;
     try {
-      await this.sound.setVolumeAsync(this.getEffectiveVolume());
+      await this.sound.setVolumeAsync(this.getEffectiveVolume(), this.getAudioPan());
     } catch (e) {
       console.warn('Volume error:', e);
     }
@@ -130,7 +142,38 @@ export class AudioManager {
   public setBoostMode(enabled: boolean) {
     this.isBoosted = enabled;
     if (this.sound && this.isLoaded) {
-      this.sound.setVolumeAsync(this.getEffectiveVolume());
+      this.sound.setVolumeAsync(this.getEffectiveVolume(), this.getAudioPan());
+    }
+  }
+
+  public getSpeakerRole(): SpeakerRole {
+    return this.speakerRole;
+  }
+
+  public getAudioPan(): number {
+    switch (this.speakerRole) {
+      case 'left':
+        return -1.0;
+      case 'right':
+        return 1.0;
+      case 'both':
+      default:
+        return 0.0;
+    }
+  }
+
+  /**
+   * Sets speaker channel role ('both' | 'left' | 'right')
+   * Routes audio cleanly without desyncing playback
+   */
+  public async setSpeakerRole(role: SpeakerRole): Promise<void> {
+    this.speakerRole = role;
+    if (this.sound && this.isLoaded) {
+      try {
+        await this.sound.setVolumeAsync(this.getEffectiveVolume(), this.getAudioPan());
+      } catch (e) {
+        console.warn('Set speaker role / pan error:', e);
+      }
     }
   }
 

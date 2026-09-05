@@ -51,6 +51,8 @@ export const GuestScreen: React.FC<Props> = ({ onLeave, onPromotedToHost }) => {
     streamBufferMs,
     setStreamBufferMs,
     streamStats,
+    mySpeakerRole,
+    isMonoSource,
   } = useRoom();
 
   const [isRejoiningManual, setIsRejoiningManual] = useState(false);
@@ -108,6 +110,38 @@ export const GuestScreen: React.FC<Props> = ({ onLeave, onPromotedToHost }) => {
           <TouchableOpacity style={styles.leaveBtn} onPress={handleLeavePress}>
             <Text style={styles.leaveBtnText}>Leave</Text>
           </TouchableOpacity>
+        </View>
+
+        {/* Assigned Speaker Channel Badge */}
+        <View style={styles.channelBar}>
+          <View
+            style={[
+              styles.channelBadge,
+              mySpeakerRole === 'left' && styles.channelBadgeLeft,
+              mySpeakerRole === 'right' && styles.channelBadgeRight,
+            ]}
+          >
+            <Text
+              style={[
+                styles.channelBadgeText,
+                mySpeakerRole === 'left' && styles.channelBadgeTextLeft,
+                mySpeakerRole === 'right' && styles.channelBadgeTextRight,
+              ]}
+            >
+              {mySpeakerRole === 'left'
+                ? '◀ LEFT SPEAKER'
+                : mySpeakerRole === 'right'
+                ? 'RIGHT SPEAKER ▶'
+                : '◀▶ STEREO MIX (BOTH)'}
+            </Text>
+          </View>
+          {isMonoSource && mySpeakerRole !== 'both' && (
+            <View style={styles.monoNoticeBox}>
+              <Text style={styles.monoNoticeText}>
+                ⚠️ Source is mono — stereo split not available
+              </Text>
+            </View>
+          )}
         </View>
 
         {/* Reconnecting Mid-Session Banner */}
@@ -585,6 +619,52 @@ const styles = StyleSheet.create({
   modalLeaveBtnText: {
     color: colors.textMuted,
     fontSize: 13,
+    fontWeight: '600',
+  },
+  channelBar: {
+    marginBottom: 10,
+    alignItems: 'center',
+  },
+  channelBadge: {
+    backgroundColor: 'rgba(6, 182, 212, 0.15)',
+    borderWidth: 1,
+    borderColor: colors.accent,
+    borderRadius: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+  },
+  channelBadgeLeft: {
+    backgroundColor: 'rgba(99, 102, 241, 0.2)',
+    borderColor: colors.primary,
+  },
+  channelBadgeRight: {
+    backgroundColor: 'rgba(168, 85, 247, 0.2)',
+    borderColor: '#c084fc',
+  },
+  channelBadgeText: {
+    color: colors.accent,
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  channelBadgeTextLeft: {
+    color: colors.primary,
+  },
+  channelBadgeTextRight: {
+    color: '#c084fc',
+  },
+  monoNoticeBox: {
+    marginTop: 6,
+    backgroundColor: colors.syncWarningBg,
+    borderWidth: 1,
+    borderColor: colors.syncWarning,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+  },
+  monoNoticeText: {
+    color: colors.syncWarning,
+    fontSize: 11,
     fontWeight: '600',
   },
 });
