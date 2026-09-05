@@ -14,7 +14,9 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.syncplay.app",
       "infoPlist": {
-        "UIBackgroundModes": ["audio"],
+        "UIBackgroundModes": [
+          "audio"
+        ],
         "NSCameraUsageDescription": "SyncPlay uses camera to scan room QR codes for quick joining."
       }
     },
@@ -36,6 +38,11 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "4b3d3bdf-b7be-4c9c-9c09-fcd8508b5ebf"
+      }
     }
   }
 }
