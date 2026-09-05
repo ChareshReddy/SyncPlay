@@ -1,0 +1,39 @@
+{
+  "expo": {
+    "name": "SyncPlay",
+    "slug": "syncplay",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0A0B10",
+    "splash": {
+      "backgroundColor": "#0A0B10"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.syncplay.app",
+      "infoPlist": {
+        "UIBackgroundModes": ["audio"],
+        "NSCameraUsageDescription": "SyncPlay uses camera to scan room QR codes for quick joining."
+      }
+    },
+    "android": {
+      "package": "com.syncplay.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#0A0B10",
+        "foregroundImage": "./assets/android-icon-foreground.png"
+      },
+      "permissions": [
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "android.permission.WAKE_LOCK",
+        "android.permission.CAMERA"
+      ],
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}
